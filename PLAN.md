@@ -1,6 +1,6 @@
 # PLAN — gsm2sip-client-android 主机 App v1
 
-> **下一阶段（2026-10-27，待实施，已按 Claude 两轮评审修订）**：[Reception v2 实施 PLAN](docs/reception-v2-PLAN.md)、[协议设计及参考依据](docs/reception-v2-protocol.md)与[mesh 整合决定](docs/reception-mesh-decision.md)。先完成电话/短信解耦与按需唤醒；用户已确认“拒接结束整通来电”，由 Homura 统一裁决，关闭监听仍只影响本机。出口容错优先受信中继备用地址，必要时再做单跳代发；完整 mesh 不作前置。
+> **Reception v2（R1 已实施并合并，2026-11-01）**：协议权威为 [SoulGem docs/reception-v2.md](https://github.com/KiriKira/gsm2sip-server/blob/main/docs/reception-v2.md)；以下为设计记录：[Reception v2 实施 PLAN](docs/reception-v2-PLAN.md)、[协议设计及参考依据](docs/reception-v2-protocol.md)与[mesh 整合决定](docs/reception-mesh-decision.md)。先完成电话/短信解耦与按需唤醒；用户已确认“拒接结束整通来电”，由 Homura 统一裁决，关闭监听仍只影响本机。出口容错优先受信中继备用地址，必要时再做单跳代发；完整 mesh 不作前置。
 
 > **0.4.0（Madoka）**：SIP/PJSUA2 已移除，通话只走服务端呼叫控制与 WebRTC，“WebRTC 语音”开关也已去掉。下文关于开关、SIP 兼容和迁移期的描述是历史记录。
 

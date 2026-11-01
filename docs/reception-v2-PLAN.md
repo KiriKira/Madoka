@@ -1,6 +1,6 @@
 # PLAN：精简接收改造与可选节点协作
 
-状态：待实施；按 [Claude 第一轮评审](https://github.com/KiriKira/gsm2sip-client-android/pull/37#issuecomment-6447204378)与[第二轮评审](https://github.com/KiriKira/gsm2sip-client-android/pull/37#issuecomment-6448183099)重新收敛。协议见 [reception-v2-protocol.md](reception-v2-protocol.md)，完整mesh的成本/取舍见 [整合决策](reception-mesh-decision.md)。本文件替代原P1–P10实施顺序，不包含调研任务。
+状态：R1 已实施并合并（2026-11-01，SoulGem#33、Kyubey#1、Homura#26、Madoka#38），协议权威为 [SoulGem docs/reception-v2.md](https://github.com/KiriKira/gsm2sip-server/blob/main/docs/reception-v2.md)，模拟器验收见 [测试计划](reception-v2-emulator-test-plan.md)与[复测记录](reception-v2-emulator-retest-20261031.md)；下文保留设计时的取舍。原状态：按 [Claude 第一轮评审](https://github.com/KiriKira/gsm2sip-client-android/pull/37#issuecomment-6447204378)与[第二轮评审](https://github.com/KiriKira/gsm2sip-client-android/pull/37#issuecomment-6448183099)重新收敛。协议见 [reception-v2-protocol.md](reception-v2-protocol.md)，完整mesh的成本/取舍见 [整合决策](reception-mesh-decision.md)。本文件替代原P1–P10实施顺序，不包含调研任务。
 
 基线：Madoka `6e8aee8`、SoulGem `494c420`、Homura `31f65a7`、Kyubey `28213b59`。本轮仅设计文档；实际实现另开PR，APK走PR CI。
 

@@ -1,6 +1,6 @@
 # Reception v2：独立电话订阅、短信同步与按需唤醒
 
-状态：精简协议提案，尚未实现；已按 PR #37 的两轮 Claude 评论修订。配套实施顺序见 [PLAN](reception-v2-PLAN.md)。本提案中的 MUST 表示实现必须满足的约束；所有时间与并发默认值是本项目的初始设计值，不是参考项目的性能承诺。
+状态：已实施，协议规范已迁入 [SoulGem docs/reception-v2.md](https://github.com/KiriKira/gsm2sip-server/blob/main/docs/reception-v2.md)，实现与本文有出入时以该文件为准；本文保留设计依据。原状态：精简协议提案；已按 PR #37 的两轮 Claude 评论修订。配套实施顺序见 [PLAN](reception-v2-PLAN.md)。本提案中的 MUST 表示实现必须满足的约束；所有时间与并发默认值是本项目的初始设计值，不是参考项目的性能承诺。
 
 核对基线（2026-10-27）：Madoka main `6e8aee8`（已合并 PR #36）；SoulGem main `494c420`；Homura main `31f65a7d`；Kyubey `28213b59`。服务端基线通过远端 main 源码核对。文档分支已合入该 Madoka main；本 PR 相对 main 仅修改文档。
 
