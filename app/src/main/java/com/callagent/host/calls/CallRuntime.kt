@@ -342,6 +342,9 @@ object CallRuntime {
      * app open tries again.
      */
     internal fun onListeningFailed(context: Context, message: String) {
+        // The message is a fixed user-facing string; no address, token or number.
+        android.util.Log.w("HostCall", "Call control could not start; reception stays on: $message")
+        com.callagent.host.data.StandbyDiagnostics.event("call_control_start_failed")
         signalingStartRequestedFor = null
         statusText = message
         notifyChanged(currentCallId)
