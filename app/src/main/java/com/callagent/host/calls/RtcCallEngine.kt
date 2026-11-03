@@ -307,6 +307,8 @@ internal class RtcCallEngine(
         if (state == EngineCallState.INCOMING) prepareMediaSoon(id)
         updateContinuousLease()
         Log.i("GsmRtc","media=webrtc call_control=rtc call_id=$id event=control_${state.name.lowercase()}")
+        com.callagent.host.data.HostRunLog.add("RTC","call=${id.take(8)} control_${state.name.lowercase()}"+
+            (snapshot.optString("reason").takeIf{it.isNotBlank()}?.let{" reason=$it"}?:""))
         listener.onCallState(EngineCallSnapshot(id,direction(snapshot),state,serverCallId=id,
             terminalReason=snapshot.optString("reason").takeIf{it.isNotBlank()}))
     }
@@ -317,6 +319,7 @@ internal class RtcCallEngine(
         // Only the session carrying the call may fail it; a preparation that
         // fails while ringing is dropped and the answer sets up afresh.
         return RtcAudioSession(context,admission,api,false,pcmForCall?.invoke(id),onReady={report(id)},
+            onLog={line->com.callagent.host.data.HostRunLog.add("MEDIA",line.substringAfter("call_id=").let{"call=${it.take(8)} ${line.substringAfter(" event=","")}"})},
             onFailure={reason->
                 val failed=session
                 if(failed!=null && prepared.remove(id,failed)) Unit
@@ -393,6 +396,7 @@ internal class RtcCallEngine(
         prepared.remove(id)?.discard()
         updateContinuousLease()
         Log.w("GsmRtc","media=webrtc call_control=rtc call_id=$id event=failed reason=$reason")
+        com.callagent.host.data.HostRunLog.add("RTC","call=${id.take(8)} failed reason=$reason")
         listener.onCallState(EngineCallSnapshot(id,direction(snapshot),EngineCallState.FAILED,serverCallId=id,
             terminalReason=reason))
     }

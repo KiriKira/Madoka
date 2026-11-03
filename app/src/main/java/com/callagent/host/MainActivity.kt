@@ -905,7 +905,7 @@ class MainActivity : AppCompatActivity() {
         val list = callHistoryList ?: return
         list.removeAllViews()
         val query = callSearchQuery.trim().lowercase()
-        val filtered = callHistory.filter { call ->
+        val filtered = CallHistoryCache.collapseForks(callHistory).filter { call ->
             query.isBlank() || listOfNotNull(call.from, call.to, call.reason).any { it.lowercase().contains(query) }
         }
         if (filtered.isEmpty()) {
@@ -1225,7 +1225,7 @@ class MainActivity : AppCompatActivity() {
                         renderCurrentScreen()
                     }.setNegativeButton("取消", null).show()
             }))
-        content.addView(HostUi.tile(this, HostUi.Position.LAST, "待机统计",
+        content.addView(HostUi.tile(this, HostUi.Position.MIDDLE, "待机统计",
             icon = R.drawable.ic_ui_refresh,
             onClick = {
                 val report = com.callagent.host.data.StandbyDiagnostics.export(this)
@@ -1238,6 +1238,10 @@ class MainActivity : AppCompatActivity() {
                         }, "导出待机统计"))
                     }.show()
             }))
+        content.addView(HostUi.tile(this, HostUi.Position.LAST, "运行日志",
+            summary = "来电、拨号、推送与呼叫控制的经过；不含号码和短信内容",
+            icon = R.drawable.ic_ui_refresh,
+            onClick = { showRunLog() }).apply { id = R.id.settings_run_log })
         content.addView(HostUi.groupHeader(this, "备份"))
         content.addView(HostUi.tile(this, HostUi.Position.FIRST, "全量备份与恢复",
             icon = R.drawable.ic_ui_archive,
@@ -4060,6 +4064,33 @@ class MainActivity : AppCompatActivity() {
         backgroundTintList = android.content.res.ColorStateList.valueOf(materialColor(com.google.android.material.R.attr.colorSecondaryContainer))
         setTextColor(materialColor(com.google.android.material.R.attr.colorOnSecondaryContainer))
         iconTint = android.content.res.ColorStateList.valueOf(materialColor(com.google.android.material.R.attr.colorOnSecondaryContainer))
+    }
+
+    private fun showRunLog() {
+        val log = com.callagent.host.data.HostRunLog
+        val recent = log.tail(this, 80).ifBlank { "暂无记录。" }
+        val text = TextView(this).apply {
+            this.text = recent
+            textSize = 11f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            setPadding(pad, pad / 2, pad, 0)
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(text) }
+        scroll.post { scroll.fullScroll(android.view.View.FOCUS_DOWN) }
+        MaterialAlertDialogBuilder(this).setTitle("运行日志（最近 80 行）")
+            .setView(scroll)
+            .setPositiveButton("分享全部") { _, _ ->
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "Madoka 运行日志")
+                    putExtra(Intent.EXTRA_TEXT, log.export(this@MainActivity))
+                }, "导出运行日志"))
+            }
+            .setNeutralButton("清空") { _, _ -> log.clear(this) }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     private fun smsArchiveEntryButton(): View = HostUi.tile(this, HostUi.Position.LAST, "短信备份与归档",

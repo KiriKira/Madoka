@@ -195,6 +195,7 @@ object CallRuntime {
     }
 
     fun answerFromVisibleUser(context: Context, callId: String): Boolean {
+        com.callagent.host.data.HostRunLog.add("UI","answer tapped call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
         val host = service ?: return false
         if (!coordinator.answer(callId)) {
@@ -208,6 +209,7 @@ object CallRuntime {
     }
 
     internal fun onTelecomAnswer(callId: String) {
+        com.callagent.host.data.HostRunLog.add("UI","answer from system call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
         val app = service ?: return
         if (app.applicationContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             rejectFromService(callId, "Microphone permission is not granted")
@@ -236,6 +238,7 @@ object CallRuntime {
     fun rejectFromNotification(context: Context, callId: String) = reject(callId, context)
 
     private fun reject(callId: String, context: Context) {
+        com.callagent.host.data.HostRunLog.add("UI","decline tapped call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
         val call = snapshot(callId) ?: return
         if (call.phase != CallPhase.INCOMING_RINGING) return
         if (!coordinator.disconnect(callId)) return
@@ -419,11 +422,13 @@ object CallRuntime {
 
     internal fun publishCall(call: CallSession, text: String? = null) {
         statusText = text.orEmpty()
+        if (!text.isNullOrBlank()) com.callagent.host.data.HostRunLog.status(text)
         notifyChanged(call.callId)
     }
 
     internal fun setStatus(text: String, callId: String? = currentCallId) {
         statusText = text
+        if (text.isNotBlank()) com.callagent.host.data.HostRunLog.status(text)
         notifyChanged(callId)
     }
 
