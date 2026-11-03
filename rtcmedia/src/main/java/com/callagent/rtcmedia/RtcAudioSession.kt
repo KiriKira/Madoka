@@ -77,12 +77,25 @@ class RtcAudioSession(
     private var everConnected=false
 
     companion object {
+        /** Longer than any ring: an incoming call expires 25 s after it is offered. */
+        private const val UNUSED_PREPARATION_SECONDS=45L
         fun isAvailable(context:Context)=NativePeer.isAvailable(context)
         fun select(api:MediaApi,callId:String):JSONObject = api.request("POST","/calls/$callId/media",JSONObject().put("media_transport","webrtc"))
     }
-    fun start() {
-        check(started.compareAndSet(false,true))
-        startedAt=System.nanoTime()
+    private val prepared=AtomicBoolean()
+    private var pendingOffer:String?=null
+    private var preparedAt=0L
+    @Volatile private var unusedExpiry:java.util.concurrent.ScheduledFuture<*>?=null
+
+    /**
+     * Builds the native peer and the local offer without signaling anything,
+     * so an incoming call can do this while it rings. The offer is posted by
+     * [start]: the server expires signal replay after 15 s, longer than a
+     * ring may last. An unused preparation discards itself.
+     */
+    fun prepare() {
+        if(!prepared.compareAndSet(false,true))return
+        preparedAt=System.nanoTime()
         event("selected")
         worker.execute {
             try {
@@ -90,12 +103,29 @@ class RtcAudioSession(
                 val native=NativePeer(context,callId,servers,pcm,::event,onDigit,{ reason -> runCatching { worker.execute { fail(reason) } }; Unit },forceRelay)
                 if(closed.get()){native.close();return@execute};peer=native
                 native.mute(desiredMute);native.enableAudio(desiredAudio)
-                event("native_ready elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-startedAt)}")
+                event("native_ready elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-preparedAt)}")
+                if(!gateway){
+                    pendingOffer=native.offer()
+                    event("offer_created elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-preparedAt)}")
+                }
+            }catch(_:Throwable){fail("native_or_offer_setup_failed")}
+        }
+        unusedExpiry=runCatching { worker.schedule({ if(!started.get()) discard() },UNUSED_PREPARATION_SECONDS,TimeUnit.SECONDS) }.getOrNull()
+    }
+
+    fun start() {
+        check(started.compareAndSet(false,true))
+        prepare()
+        worker.execute {
+            try {
+                if(closed.get() || failed.get())return@execute
+                checkNotNull(peer)
+                startedAt=System.nanoTime()
                 if(!gateway){
                     refresh()
-                    val offer=native.offer()
-                    event("offer_created elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-startedAt)}")
-                    send("offer",offer)
+                    send("offer",checkNotNull(pendingOffer))
+                    pendingOffer=null
+                    event("offer_sent prepared_ms=${TimeUnit.NANOSECONDS.toMillis(startedAt-preparedAt)}")
                 }
                 if(!closed.get())worker.scheduleWithFixedDelay(::poll,0,250,TimeUnit.MILLISECONDS)
             }catch(_:Throwable){fail("native_or_offer_setup_failed")}
@@ -104,7 +134,9 @@ class RtcAudioSession(
     private fun poll() {
         if(closed.get())return
         val now=System.nanoTime()
-        if(isConnected && outgoingIce.isEmpty() && peer?.hasQueuedCandidates!=true && localEndQueued && now-lastPoll<2_000_000_000L)return
+        // A host's call is up only once the gateway reports cellular audio,
+        // so keep polling briskly until then.
+        if(isConnected && (gateway || cellularActive) && outgoingIce.isEmpty() && peer?.hasQueuedCandidates!=true && localEndQueued && now-lastPoll<2_000_000_000L)return
         lastPoll=now
         try {
             val result=refresh()
@@ -230,13 +262,23 @@ class RtcAudioSession(
         if(closed.get() || !failed.compareAndSet(false,true))return
         event("failed reason=$reason");connectionLatch.countDown()
         // Fail closed even if the app callback itself throws.
-        try{onFailure(reason)}finally{close()}
+        // Nothing was signaled before start, so a failed preparation leaves
+        // the leg for a fresh session to use.
+        try{onFailure(reason)}finally{close(notifyPeer = started.get())}
     }
     fun awaitShutdown(timeoutMillis:Long):Boolean = worker.awaitTermination(timeoutMillis,TimeUnit.MILLISECONDS)
-    override fun close(){
+    override fun close() = close(notifyPeer = true)
+
+    /** Drops local media without signaling: for a preparation that was never
+     * started, whose leg another session or the call's end owns. */
+    fun discard() = close(notifyPeer = false)
+
+    private fun close(notifyPeer:Boolean){
         if(!closed.compareAndSet(false,true))return
         connectionLatch.countDown();peer?.close();peer=null
-        runCatching{worker.execute {runCatching{send("close")}}};worker.shutdown()
-        event("closed")
+        unusedExpiry?.cancel(false)
+        if(notifyPeer)runCatching{worker.execute {runCatching{send("close")}}}
+        worker.shutdown()
+        event(if(notifyPeer)"closed" else "discarded")
     }
 }
