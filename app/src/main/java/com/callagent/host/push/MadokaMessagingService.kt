@@ -14,6 +14,7 @@ class MadokaMessagingService : FirebaseMessagingService() {
         val wire = when (data["v"]) { null, "1" -> 1; "2" -> 2; else -> return }
         if (data["type"] != "sync") return
         android.util.Log.i("HostPush", "received wire=$wire kind=${data["kind"]} priority=${message.priority} original=${message.originalPriority}")
+        com.callagent.host.data.HostRunLog.add("PUSH", "wire=$wire kind=${data["kind"]} call=${data["call_id"]?.take(8) ?: "-"} priority=${message.priority}/${message.originalPriority}")
         PushWake.handle(applicationContext, data["kind"], data["device_id"],
             allowServiceStart = message.priority == RemoteMessage.PRIORITY_HIGH,
             actualPriority = message.priority, originalPriority = message.originalPriority, wire = wire)

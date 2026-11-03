@@ -5,6 +5,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 /** Bounded, in-memory counters. Never retain URLs, identifiers, payloads or credentials. */
 object StandbyDiagnostics {
+    /** Counted here, too frequent for the run log. */
+    private val QUIET_EVENTS = setOf("rtc_poll_succeeded", "rtc_poll_idle", "rtc_poll_live", "rtc_poll_sleepy", "push_sleep_beat")
     data class Counts(val requests: Long, val failures: Long, val elapsedNanos: Long, val sentBytes: Long = 0, val receivedBytes: Long = 0)
     private class Counter {
         val requests = AtomicLong()
@@ -55,6 +57,7 @@ object StandbyDiagnostics {
     @Volatile private var originalPriority = 0
 
     @Synchronized fun event(kind: String) {
+        if (kind !in QUIET_EVENTS) HostRunLog.add("EVENT", kind)
         val now = android.os.SystemClock.elapsedRealtime()
         if (kind == "wss_open") socketStart = now
         if (kind == "wss_closed") {

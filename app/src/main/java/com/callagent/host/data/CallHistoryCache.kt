@@ -32,6 +32,39 @@ object CallHistoryCache {
         return merged.values.sortedByDescending { timestampMillis(it.createdAt) }
     }
 
+    /** How far apart one cellular call's records on different nodes may start. */
+    private const val FORK_WINDOW_MS = 30_000L
+
+    /**
+     * One incoming cellular call offered through several nodes leaves a record
+     * on each, and the node whose host lost shows "answered elsewhere" even
+     * when this phone answered through another node. Show one row per call:
+     * records from different nodes, same caller, starting within 30 s, keep
+     * the one that says most (answered, then live or declined, then missed,
+     * then answered elsewhere). Calls on the same node are never merged.
+     */
+    fun collapseForks(calls: List<RemoteCall>): List<RemoteCall> {
+        val kept = ArrayList<RemoteCall>(calls.size)
+        for (call in calls.sortedByDescending { forkRank(it) }) {
+            val incoming = call.direction in setOf("incoming", "inbound")
+            val time = timestampMillis(call.createdAt)
+            val twin = incoming && time > 0L && kept.any { other ->
+                other.gatewayId != call.gatewayId && other.direction == call.direction &&
+                    other.from.orEmpty() == call.from.orEmpty() &&
+                    timestampMillis(other.createdAt).let { it > 0L && kotlin.math.abs(it - time) <= FORK_WINDOW_MS }
+            }
+            if (!twin) kept += call
+        }
+        return kept.sortedByDescending { timestampMillis(it.createdAt) }
+    }
+
+    private fun forkRank(call: RemoteCall): Int = when {
+        call.answeredAt != null -> 4
+        call.state != "ended" || call.reason == "declined" -> 3
+        call.reason != "answered_elsewhere" -> 2
+        else -> 1
+    }
+
     /** A call left this long in a live state is re-read rather than trusted. */
     private const val SETTLE_MS = 2 * 60 * 1000L
     private const val MAX_STALE_LOOKUPS = 5

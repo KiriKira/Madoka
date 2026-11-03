@@ -194,7 +194,7 @@ class HostCallService : android.app.Service() {
                 receptionV2 = ReceptionV2.active(this, session),
                 pushReady = runCatching { com.callagent.host.push.PushRegistration.isReady(this, session.sessionInstanceId) }.getOrDefault(false)
             )) return
-        Log.i(TAG, "Call control idle; the next call arrives by push")
+        Log.i(TAG, "Call control idle; the next call arrives by push"); com.callagent.host.data.HostRunLog.add("CALL", "Call control idle; the next call arrives by push")
         com.callagent.host.data.StandbyDiagnostics.event("call_control_stopped_until_push")
         listeningGeneration.incrementAndGet()
         stoppingUntilInvited = true
@@ -434,7 +434,7 @@ class HostCallService : android.app.Service() {
     }
 
     internal fun failCall(callId: String, message: String) {
-        Log.w(TAG, "Call failed: $message")
+        Log.w(TAG, "Call failed: $message"); com.callagent.host.data.HostRunLog.add("CALL", "Call failed: $message")
         executeOnIo {
             val call = CallRuntime.snapshot(callId) ?: return@executeOnIo
             if (call.phase in setOf(CallPhase.ENDED, CallPhase.FAILED)) return@executeOnIo
@@ -637,10 +637,14 @@ class HostCallService : android.app.Service() {
         ringback.stop(callId)
         val before = CallRuntime.snapshot(callId) ?: return
         if (before.phase in setOf(CallPhase.ENDED, CallPhase.FAILED)) return
+        // The gateway ended a call that never connected: say so, or the user
+        // only sees it hang up.
+        val notConnected = notConnectedNotice(before.direction, before.phase)
         finishCall(
             callId,
             failed = false,
-            statusText = "通话已结束。"
+            endNotice = notConnected,
+            statusText = notConnected ?: "通话已结束。"
         )
         // The engine is already terminal: release Telecom, audio and the call foreground service first.
         // The optional server reason can arrive afterward and is fenced to this ended call ID.
@@ -655,7 +659,7 @@ class HostCallService : android.app.Service() {
     private fun matchIncomingInvite(snapshot: EngineCallSnapshot) {
         val serverCallId = snapshot.serverCallId?.trim()?.takeIf { it.isNotBlank() }
         if (serverCallId == null) {
-            Log.w(TAG, "Declined an invitation without a server call id")
+            Log.w(TAG, "Declined an invitation without a server call id"); com.callagent.host.data.HostRunLog.add("CALL", "Declined an invitation without a server call id")
             runCatching { callEngine?.reject(snapshot.callId, CallRejection.DECLINED) }
             return
         }
@@ -666,12 +670,12 @@ class HostCallService : android.app.Service() {
             val api = apiForCurrentSession()
             val authority = api.rtcCall(serverCallId)
             if (authority.callId != serverCallId || authority.clientId != session.deviceId) {
-                Log.w(TAG, "Declined an invitation the server did not address to this device")
+                Log.w(TAG, "Declined an invitation the server did not address to this device"); com.callagent.host.data.HostRunLog.add("CALL", "Declined an invitation the server did not address to this device")
                 runCatching { callEngine?.reject(snapshot.callId, CallRejection.DECLINED) }
                 return
             }
             if (!authorityStillRinging(api, authority)) {
-                Log.w(TAG, "Declined an invitation for a call the server no longer rings (state ${authority.state})")
+                Log.w(TAG, "Declined an invitation for a call the server no longer rings (state ${authority.state})"); com.callagent.host.data.HostRunLog.add("CALL", "Declined an invitation for a call the server no longer rings (state ${authority.state})")
                 runCatching { callEngine?.reject(snapshot.callId, CallRejection.DECLINED) }
                 return
             }
@@ -688,7 +692,7 @@ class HostCallService : android.app.Service() {
                 nowEpochMillis = System.currentTimeMillis()
             )
             if (!accepted) {
-                Log.w(TAG, "Declined an invitation while another call is in progress")
+                Log.w(TAG, "Declined an invitation while another call is in progress"); com.callagent.host.data.HostRunLog.add("CALL", "Declined an invitation while another call is in progress")
                 runCatching { callEngine?.reject(snapshot.callId, CallRejection.DECLINED) }
                 return
             }
@@ -707,7 +711,7 @@ class HostCallService : android.app.Service() {
             }
             stopSignalingForeground()
             CallRuntime.notifyChanged(serverCallId)
-            Log.i(TAG, "Incoming call ringing")
+            Log.i(TAG, "Incoming call ringing"); com.callagent.host.data.HostRunLog.add("CALL", "Incoming call ringing")
         } catch (failure: Exception) {
             Log.w(TAG, "Incoming call handling failed: ${failure.javaClass.simpleName}", failure)
             if (acceptedCallId != null) {
@@ -729,7 +733,7 @@ class HostCallService : android.app.Service() {
                     current.expiresAtEpochMillis > System.currentTimeMillis()
                 ) return@executeOnIo
                 val engineCallId = inboundEngineIds[call.callId]
-                Log.i(TAG, "Incoming call was not answered in time")
+                Log.i(TAG, "Incoming call was not answered in time"); com.callagent.host.data.HostRunLog.add("CALL", "Incoming call was not answered in time")
                 if (engineCallId != null) runCatching { callEngine?.reject(engineCallId, CallRejection.EXPIRED) }
                 finishCall(call.callId, failed = false, statusText = "来电已超时。")
             }
@@ -758,6 +762,8 @@ class HostCallService : android.app.Service() {
         ringback.stop(callId)
         val current = CallRuntime.snapshot(callId) ?: return
         if (current.phase in setOf(CallPhase.ENDED, CallPhase.FAILED)) return
+        com.callagent.host.data.HostRunLog.add("CALL", "finish call=${callId.take(8)} ${current.direction} from=${current.phase} " +
+            "failed=$failed${if (failed) " reason=$failureReason" else ""}${endNotice?.let { " notice=$it" }.orEmpty()}")
         networkRecoveryPolicy.invalidate()
         networkLossWindow = null
         cancelNetworkLossTimeout()
@@ -1276,6 +1282,17 @@ class HostCallService : android.app.Service() {
     private fun CallPhase.isInProgress(): Boolean = this !in setOf(CallPhase.IDLE, CallPhase.ENDED, CallPhase.FAILED)
 
     companion object {
+        /** What to tell the user when the gateway ends a call before it connected. */
+        internal fun notConnectedNotice(direction: CallDirection, phase: CallPhase): String? = when {
+            direction == CallDirection.INCOMING && phase == CallPhase.ANSWERING ->
+                "未能接通：网关在接通前结束了来电，可能已超出响铃时间或对方已挂断。"
+            // The phase cannot tell the callee's no-answer from a dial the
+            // gateway could not place: progress arrives before it dials.
+            direction == CallDirection.OUTGOING && phase in setOf(
+                CallPhase.AUTHORIZING_OUTBOUND, CallPhase.REGISTERING, CallPhase.DIALING, CallPhase.OUTBOUND_RINGING
+            ) -> "未接通：对方未接听或占线，或网关未能拨出（网关手机可能正有来电或通话）。详情可在设置的运行日志中查看。"
+            else -> null
+        }
         /**
          * Call control may stop until the next invitation only while it is
          * listening with no call work of any kind, and only where a node that
