@@ -76,6 +76,8 @@ internal class RtcCallEngine(
     private var reportedUnreachable = false
     private var networkRegistered = false
     private val media = ConcurrentHashMap<String,RtcAudioSession>()
+    /** Incoming media set up while ringing, taken over on answer. */
+    private val prepared = ConcurrentHashMap<String,RtcAudioSession>()
     private val snapshots = ConcurrentHashMap<String,JSONObject>()
     private val delivered = ConcurrentHashMap<String,EngineCallState>()
     private val terminalSeenAt = ConcurrentHashMap<String, Long>()
@@ -300,19 +302,53 @@ internal class RtcCallEngine(
             } else null
         }
         retired?.close()
+        // Closing a native peer can block; never under the lifecycle lock.
+        if (state in TERMINAL) prepared.remove(id)?.discard()
+        if (state == EngineCallState.INCOMING) prepareMediaSoon(id)
         updateContinuousLease()
         Log.i("GsmRtc","media=webrtc call_control=rtc call_id=$id event=control_${state.name.lowercase()}")
         listener.onCallState(EngineCallSnapshot(id,direction(snapshot),state,serverCallId=id,
             terminalReason=snapshot.optString("reason").takeIf{it.isNotBlank()}))
     }
-    private fun startMedia(id:String){
+    private fun newSession(id:String):RtcAudioSession{
         val admission=RtcAudioSession.select(api,id)
         check(admission.getString("call_control")=="rtc"){"Server call control required"}
-        val rtc=RtcAudioSession(context,admission,api,false,pcmForCall?.invoke(id),onReady={report(id)},
-            onFailure={reason->handleMediaFailure(id,reason)})
+        var session:RtcAudioSession?=null
+        // Only the session carrying the call may fail it; a preparation that
+        // fails while ringing is dropped and the answer sets up afresh.
+        return RtcAudioSession(context,admission,api,false,pcmForCall?.invoke(id),onReady={report(id)},
+            onFailure={reason->
+                val failed=session
+                if(failed!=null && prepared.remove(id,failed)) Unit
+                else handleMediaFailure(id,reason)
+            }).also { session=it }
+    }
+
+    /**
+     * While an incoming call rings, build its peer and offer, so answering
+     * only has to accept and post the offer. Best effort: any failure leaves
+     * the answer to set media up as before.
+     */
+    private fun prepareMediaSoon(id:String){
+        runCatching { worker.execute {
+            if (closed.get() || media.containsKey(id) || prepared.containsKey(id)) return@execute
+            if (snapshots[id]?.let { liveInvitation(it) } != true) return@execute
+            val rtc = runCatching { newSession(id) }.getOrNull() ?: return@execute
+            val kept = synchronized(lifecycle) {
+                !closed.get() && delivered[id] == EngineCallState.INCOMING && !media.containsKey(id) &&
+                    prepared.putIfAbsent(id, rtc) == null
+            }
+            // Never close a leg an answer already owns: drop it quietly.
+            if (kept) rtc.prepare() else rtc.discard()
+        } }
+    }
+
+    private fun startMedia(id:String){
+        val rtc=prepared.remove(id)?.takeUnless { it.isClosed } ?: newSession(id)
         synchronized(lifecycle) {
             if (closed.get() || delivered[id] in TERMINAL) { rtc.close(); return }
-            if (media.putIfAbsent(id,rtc) != null) { rtc.close(); error("Media already exists") }
+            // Another session already owns this leg; never signal its close.
+            if (media.putIfAbsent(id,rtc) != null) { rtc.discard(); error("Media already exists") }
             try {
                 rtc.enableAudio(id in audioAllowed)
                 rtc.start()
@@ -354,6 +390,7 @@ internal class RtcCallEngine(
             media.remove(id)
         }
         retired?.close()
+        prepared.remove(id)?.discard()
         updateContinuousLease()
         Log.w("GsmRtc","media=webrtc call_control=rtc call_id=$id event=failed reason=$reason")
         listener.onCallState(EngineCallSnapshot(id,direction(snapshot),EngineCallState.FAILED,serverCallId=id,
@@ -412,6 +449,7 @@ internal class RtcCallEngine(
             media.remove(id)
         }
         retired?.close()
+        prepared.remove(id)?.discard()
         updateContinuousLease()
         listener.onCallState(EngineCallSnapshot(id,direction(snapshot),EngineCallState.DISCONNECTED,serverCallId=id,
             terminalReason=reason))
@@ -493,5 +531,6 @@ internal class RtcCallEngine(
             media.values.toList().also { media.clear(); snapshots.clear(); delivered.clear(); terminalSeenAt.clear(); audioAllowed.clear() }
         }
         retired.forEach { it.close() }
+        prepared.values.toList().also { prepared.clear() }.forEach { it.discard() }
     }
 }
