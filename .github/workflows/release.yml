@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the release after a successful signed build. Non-main refs are always build-only.
+        description: Publish only from main or a v* tag after the signed build succeeds.
         required: true
         type: boolean
         default: true
@@ -101,10 +101,19 @@ jobs:
                 publish_enabled=true
               fi
               ;;
+            workflow_dispatch:refs/tags/v*)
+              release_tag="$GITHUB_REF_NAME"
+              release_name="$GITHUB_REF_NAME"
+              version_name="$GITHUB_REF_NAME"
+              release_kind=stable
+              if [[ "$PUBLISH_INPUT" == "true" ]]; then
+                publish_enabled=true
+              fi
+              ;;
             workflow_dispatch:*)
               sign_release=false
               release_kind=validation
-              echo "::notice::Manual runs outside main, including tag refs, are build-only; release signing and publication are disabled."
+              echo "::notice::Manual runs outside main and v* tags are build-only; release signing and publication are disabled."
               ;;
             *)
               echo "::error::Unsupported release workflow ref: ${GITHUB_EVENT_NAME}:${GITHUB_REF}"
@@ -281,7 +290,7 @@ jobs:
     if: >-
       needs.build.outputs.publish_enabled == 'true' &&
       ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) ||
-       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish == true))
+       (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && inputs.publish == true))
     runs-on: ubuntu-latest
     permissions:
       actions: read
