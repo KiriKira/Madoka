@@ -7,6 +7,11 @@ on:
         description: Existing Android KVM UI smoke run ID
         required: true
         type: string
+      artifact_name:
+        description: UI smoke artifact name (legacy runs use gsm2sip-host-android-ui-smoke)
+        required: false
+        type: string
+        default: Madoka-android-ui-smoke
   push:
     paths:
       - '.github/workflows/repackage-ui-evidence.yml'
@@ -25,8 +30,21 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.event.inputs.run_id || '37216669814' }}
-          name: gsm2sip-host-android-ui-smoke
+          name: ${{ github.event_name == 'push' && 'gsm2sip-host-android-ui-smoke' || (inputs.artifact_name || 'Madoka-android-ui-smoke') }}
           path: recovered
+
+      - name: Stage branded recovered APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f recovered/artifacts/android-ui-smoke/Madoka-debug.apk ]]; then
+            cp recovered/artifacts/android-ui-smoke/Madoka-debug.apk Madoka-debug.apk
+          elif [[ -f recovered/app/build/outputs/apk/debug/app-debug.apk ]]; then
+            cp recovered/app/build/outputs/apk/debug/app-debug.apk Madoka-debug.apk
+          else
+            echo "No recovered Madoka APK found" >&2
+            exit 1
+          fi
 
       - name: Print paired launch crash diagnostics
         run: |
@@ -43,7 +61,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-ui-diagnostics
+          name: Madoka-ui-diagnostics
           path: |
             recovered/artifacts/android-ui-smoke/**/*.txt
             recovered/artifacts/android-ui-smoke/**/*.xml
@@ -54,7 +72,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-ui-key-screenshots
+          name: Madoka-ui-key-screenshots
           path: |
             recovered/artifacts/android-ui-smoke/*.png
             recovered/artifacts/android-ui-smoke/paired-fixture/paired*.png
@@ -66,7 +84,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-runtime-apk
-          path: recovered/app/build/outputs/apk/debug/app-debug.apk
+          name: Madoka-runtime-apk
+          path: Madoka-debug.apk
           if-no-files-found: error
           retention-days: 14

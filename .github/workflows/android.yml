@@ -1,4 +1,4 @@
-name: Android client
+name: Madoka Android client
 
 on:
   push:
@@ -36,12 +36,15 @@ jobs:
               info['sha256']['gateway-magisk.zip'] = hashlib.sha256(Path('gateway-magisk.zip').read_bytes()).hexdigest()
           Path('BUILD-INFO.json').write_text(json.dumps(info, indent=2) + '\n')
           PY
+      - name: Stage branded debug APK
+        shell: bash
+        run: cp app/build/outputs/apk/debug/app-debug.apk Madoka-debug.apk
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-debug-apk
+          name: Madoka-debug-apk
           path: |
-            app/build/outputs/apk/debug/app-debug.apk
+            Madoka-debug.apk
             BUILD-INFO.json
             DEBUG-BATCH.md
           if-no-files-found: error

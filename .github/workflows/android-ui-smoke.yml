@@ -91,11 +91,20 @@ jobs:
         run: |
           python3 scripts/package-ui-review-evidence.py --artifact-dir artifacts/android-ui-smoke --apk app/build/outputs/apk/debug/app-debug.apk --output-dir artifacts/ui-review-evidence
 
+      - name: Stage branded UI test APK
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f app/build/outputs/apk/debug/app-debug.apk ]]; then
+            mkdir -p artifacts/android-ui-smoke
+            cp app/build/outputs/apk/debug/app-debug.apk artifacts/android-ui-smoke/Madoka-debug.apk
+          fi
+
       - name: Upload review evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-ui-review-evidence
+          name: Madoka-ui-review-evidence
           path: artifacts/ui-review-evidence/**
           if-no-files-found: warn
           retention-days: 14
@@ -105,10 +114,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-android-ui-smoke
+          name: Madoka-android-ui-smoke
           path: |
             artifacts/android-ui-smoke/**
-            app/build/outputs/apk/debug/**
             app/build/reports/**
           if-no-files-found: warn
           retention-days: 14
@@ -117,7 +125,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-ui-diagnostics
+          name: Madoka-ui-diagnostics
           path: |
             artifacts/android-ui-smoke/**/*.json
             artifacts/android-ui-smoke/**/*.txt
@@ -131,7 +139,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-ui-key-screenshots
+          name: Madoka-ui-key-screenshots
           path: artifacts/android-ui-smoke/**/*.png
           if-no-files-found: warn
           retention-days: 14
@@ -140,8 +148,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-host-runtime-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Madoka-runtime-apk
+          path: artifacts/android-ui-smoke/Madoka-debug.apk
           if-no-files-found: warn
           retention-days: 14
 
