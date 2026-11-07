@@ -90,7 +90,7 @@ clearly if these values or the keystore file are missing.
 
 The workflow publishes these payload files:
 
-- `gsm2sip-host.apk`
+- `Madoka.apk`
 - `release-manifest.json`
 - `SHA256SUMS.txt`
 

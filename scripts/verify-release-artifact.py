@@ -18,7 +18,7 @@ from typing import Sequence
 PACKAGE_NAME = "com.callagent.host"
 EXPECTED_ABIS = {"arm64-v8a"}
 REQUIRED_NATIVE_LIBRARY = "libjingle_peerconnection_so.so"
-APK_NAME = "gsm2sip-host.apk"
+APK_NAME = "Madoka.apk"
 
 
 class ReleaseValidationError(RuntimeError):

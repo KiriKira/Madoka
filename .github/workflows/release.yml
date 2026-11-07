@@ -1,4 +1,4 @@
-name: Signed Android releases
+name: Madoka signed Android releases
 
 on:
   push:
@@ -270,7 +270,7 @@ jobs:
         if: steps.release_meta.outputs.sign_release == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: gsm2sip-signed-release-bundle
+          name: Madoka-signed-release-bundle
           path: artifacts/release-bundle/
           if-no-files-found: error
           retention-days: 30
@@ -290,7 +290,7 @@ jobs:
       - name: Download verified release bundle
         uses: actions/download-artifact@v4
         with:
-          name: gsm2sip-signed-release-bundle
+          name: Madoka-signed-release-bundle
           path: release-artifact
 
       - name: Publish release bundle without checking out source
@@ -422,16 +422,16 @@ jobs:
             --ks-key-alias "$GSM_RELEASE_KEY_ALIAS" \
             --ks-pass env:GSM_RELEASE_STORE_PASSWORD \
             --key-pass env:GSM_RELEASE_KEY_PASSWORD \
-            --out host-debug-arm64.apk "$apk"
-          "$tools/apksigner" verify --verbose --print-certs host-debug-arm64.apk > signature.txt
+            --out Madoka-debug-arm64.apk "$apk"
+          "$tools/apksigner" verify --verbose --print-certs Madoka-debug-arm64.apk > signature.txt
           cat signature.txt
           expected="${GSM_RELEASE_CERT_SHA256//:/}"
           expected="${expected,,}"
           actual="$(awk -F': ' '/Signer #1 certificate SHA-256 digest:/ { print tolower($2); exit }' signature.txt)"
           [[ "$actual" == "$expected" ]] || { echo '::error::APK certificate does not match the permanent release certificate pin.'; exit 1; }
-          "$tools/aapt" dump badging host-debug-arm64.apk > badging.txt
+          "$tools/aapt" dump badging Madoka-debug-arm64.apk > badging.txt
           grep -qx 'application-debuggable' badging.txt
-          sha256sum host-debug-arm64.apk > SHA256SUMS.txt
+          sha256sum Madoka-debug-arm64.apk > SHA256SUMS.txt
           cat > BUILD-REPORT.md <<EOF
           # Host signed debug build
 
@@ -439,14 +439,14 @@ jobs:
           Branch: ${GITHUB_REF_NAME}
           Android variant: debuggable, version ${GSM_RELEASE_VERSION_NAME} (${GSM_RELEASE_VERSION_CODE})
           APK signing certificate SHA-256: ${expected}
-          APK SHA-256: $(sha256sum host-debug-arm64.apk | awk '{print $1}')
+          APK SHA-256: $(sha256sum Madoka-debug-arm64.apk | awk '{print $1}')
           Unit tests and lint: passed
           EOF
       - uses: actions/upload-artifact@v4
         with:
-          name: host-permanent-key-signed-debug
+          name: Madoka-permanent-key-signed-debug
           path: |
-            host-debug-arm64.apk
+            Madoka-debug-arm64.apk
             SHA256SUMS.txt
             BUILD-REPORT.md
           if-no-files-found: error
