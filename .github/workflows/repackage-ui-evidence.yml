@@ -12,9 +12,6 @@ on:
         required: false
         type: string
         default: Madoka-android-ui-smoke
-  push:
-    paths:
-      - '.github/workflows/repackage-ui-evidence.yml'
 
 permissions:
   contents: read
@@ -29,7 +26,7 @@ jobs:
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ github.event.inputs.run_id || '37216669814' }}
+          run-id: ${{ inputs.run_id }}
           name: ${{ github.event_name == 'push' && 'gsm2sip-host-android-ui-smoke' || (inputs.artifact_name || 'Madoka-android-ui-smoke') }}
           path: recovered
 
