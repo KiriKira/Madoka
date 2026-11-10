@@ -273,7 +273,7 @@ class MainActivity : AppCompatActivity() {
                 CallRuntime.ACTION_STATE_CHANGED -> renderCurrentScreen()
                 NodeMonitor.ACTION_NODE_CHANGED -> if (sessionStore.read()?.sameSessionInstance(session ?: return) != true) {
                     showCurrentSession("")
-                } else if (navigation.tab == HostTab.SETTINGS) {
+                } else if (navigation.tab == HostTab.SETTINGS && !refreshSettingsInPlace()) {
                     renderCurrentScreen()
                 }
             }
@@ -1161,25 +1161,7 @@ class MainActivity : AppCompatActivity() {
                 id = R.id.settings_device_list
                 orientation = LinearLayout.VERTICAL
             }
-            when {
-                pairedHostsAvailable == false -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, "当前服务器不提供设备列表。", icon = R.drawable.ic_ui_device))
-                pairedHosts.isEmpty() -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, pairedHostsRefreshIssue ?: "暂无设备记录。", icon = R.drawable.ic_ui_device))
-                else -> {
-                    // A re-paired phone leaves its old pairing behind on the node:
-                    // list only pairings that still sign in, this phone first.
-                    val now = System.currentTimeMillis()
-                    val shown = pairedHosts.filter { it.inUse(now) }.sortedByDescending { it.isSelf }
-                    shown.forEachIndexed { index, host ->
-                        devices.addView(HostUi.tile(this, HostUi.position(index, shown.size),
-                            title = host.name,
-                            summary = if (host.isSelf) "此手机" else host.pairingStateLabel(),
-                            icon = R.drawable.ic_ui_device))
-                    }
-                    (pairedHosts.size - shown.size).takeIf { it > 0 }?.let { hidden ->
-                        devices.addView(caption("另有 $hidden 条不再使用的配对未显示"))
-                    }
-                }
-            }
+            fillPairedDevices(devices)
             content.addView(devices)
             content.addView(HostUi.groupHeader(this, "旧手机与 SIM 卡"))
             content.addView(gatewayStatusCard(compact = false))
@@ -1196,6 +1178,70 @@ class MainActivity : AppCompatActivity() {
             content.addView(HostUi.groupHeader(this, "后台接收"))
             addBackgroundReceptionSettings(content)
         }
+        addStandbyAndBackupSettings(content)
+        settingsMessage = null
+    }
+
+    /**
+     * Brings a visible paired Settings page up to date without rebuilding it.
+     * A rebuild replaces the scroll view, which draws a frame at the top
+     * before the old position returns: with node probes and the 30-second
+     * sync landing here, the page kept jumping. Returns false when the page
+     * is not showing or its structure changed, and a full render is needed.
+     */
+    private fun refreshSettingsInPlace(): Boolean {
+        if (navigation.tab != HostTab.SETTINGS || navigation.destination != HostDestination.Home) return false
+        if (session == null || settingsMessage != null) return false
+        val host = adaptiveHost ?: return false
+        val devices = host.findViewById<LinearLayout>(R.id.settings_device_list) ?: return false
+        val nodes = HostNodes.nodes(this)
+        val nodeList = host.findViewById<NodeListView>(R.id.settings_node_list)
+        val pushTile = host.findViewById<View>(R.id.settings_node_push)
+        if (nodes.size >= 2) {
+            if (nodeList == null || !nodeList.submit(serverNodeRows(nodes))) return false
+        } else {
+            if (nodeList != null) return false
+            val instance = session?.sessionInstanceId
+            if ((pushTile == null) != (instance == null)) return false
+            if (pushTile != null && instance != null) replaceInParent(pushTile, singleNodePushTile(instance))
+        }
+        devices.removeAllViews()
+        fillPairedDevices(devices)
+        refreshGatewayStatusCard()
+        refreshBackgroundStatus()
+        return true
+    }
+
+    private fun replaceInParent(current: View, replacement: View) {
+        val parent = current.parent as? ViewGroup ?: return
+        val index = parent.indexOfChild(current)
+        parent.removeViewAt(index)
+        parent.addView(replacement, index)
+    }
+
+    private fun fillPairedDevices(devices: LinearLayout) {
+        when {
+            pairedHostsAvailable == false -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, "当前服务器不提供设备列表。", icon = R.drawable.ic_ui_device))
+            pairedHosts.isEmpty() -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, pairedHostsRefreshIssue ?: "暂无设备记录。", icon = R.drawable.ic_ui_device))
+            else -> {
+                // A re-paired phone leaves its old pairing behind on the node:
+                // list only pairings that still sign in, this phone first.
+                val now = System.currentTimeMillis()
+                val shown = pairedHosts.filter { it.inUse(now) }.sortedByDescending { it.isSelf }
+                shown.forEachIndexed { index, host ->
+                    devices.addView(HostUi.tile(this, HostUi.position(index, shown.size),
+                        title = host.name,
+                        summary = if (host.isSelf) "此手机" else host.pairingStateLabel(),
+                        icon = R.drawable.ic_ui_device))
+                }
+                (pairedHosts.size - shown.size).takeIf { it > 0 }?.let { hidden ->
+                    devices.addView(caption("另有 $hidden 条不再使用的配对未显示"))
+                }
+            }
+        }
+    }
+
+    private fun addStandbyAndBackupSettings(content: LinearLayout) {
         content.addView(HostUi.groupHeader(this, "待机与省电"))
         val sleepy = com.callagent.host.calls.StandbyPowerPolicy.sleepyListening(this)
         content.addView(HostUi.tile(this, HostUi.Position.FIRST, "省电接听",
@@ -1249,7 +1295,6 @@ class MainActivity : AppCompatActivity() {
             onClick = { startActivity(Intent(this, com.callagent.host.backup.HostFullBackupActivity::class.java)) }
         ).apply { id = R.id.full_backup_entry })
         content.addView(smsArchiveEntryButton())
-        settingsMessage = null
     }
 
     private fun addBackgroundReceptionSettings(content: LinearLayout) {
@@ -1320,20 +1365,9 @@ class MainActivity : AppCompatActivity() {
         com.callagent.host.push.PushProbe.refreshIfStale(this)
         val nodes = HostNodes.nodes(this)
         if (nodes.size < 2) {
-            session?.sessionInstanceId?.let { instance ->
-                val push = com.callagent.host.push.PushRegistration.status(this, instance)
-                val path = com.callagent.host.push.PushProbe.probe(instance)
-                    ?.let { NodeRowPresenter.pushPath(it, android.os.SystemClock.elapsedRealtime()) }
-                content.addView(HostUi.tile(this, HostUi.Position.FIRST, "推送",
-                    summary = listOfNotNull(NodeRowPresenter.pushShort(push), path).joinToString(" · "),
-                    icon = R.drawable.ic_ui_refresh,
-                    onClick = { retryPush() }).apply { id = R.id.settings_node_push })
-            }
+            session?.sessionInstanceId?.let { instance -> content.addView(singleNodePushTile(instance)) }
         } else {
-            val push = nodes.associate { it.key to com.callagent.host.push.PushRegistration.status(this, it.sessionInstanceId) }
-            val probes = nodes.mapNotNull { node -> com.callagent.host.push.PushProbe.probe(node.sessionInstanceId)?.let { node.key to it } }.toMap()
-            val rows = NodeRowPresenter.rows(nodes, HostNodes.health(this), HostNodes.activeNode(this)?.key, push, probes)
-            content.addView(NodeListView(this, rows,
+            content.addView(NodeListView(this, serverNodeRows(nodes),
                 onReorder = { order ->
                     if (HostNodes.reorder(this, order)) probeNodes(force = true)
                     // Re-render after the drag gesture has fully finished.
@@ -1356,6 +1390,23 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(HostUi.tile(this, addPosition, "添加服务器节点",
             icon = R.drawable.ic_ui_add, onClick = { showAddNodeDialog() }).apply { id = R.id.settings_nodes_add })
+    }
+
+    private fun serverNodeRows(nodes: List<com.callagent.host.mesh.HostNode>): List<com.callagent.host.ui.NodeRow> {
+        val push = nodes.associate { it.key to com.callagent.host.push.PushRegistration.status(this, it.sessionInstanceId) }
+        val probes = nodes.mapNotNull { node -> com.callagent.host.push.PushProbe.probe(node.sessionInstanceId)?.let { node.key to it } }.toMap()
+        return NodeRowPresenter.rows(nodes, HostNodes.health(this), HostNodes.activeNode(this)?.key, push, probes)
+    }
+
+    /** The single-node push tile; [refreshSettingsInPlace] swaps it for a fresh one. */
+    private fun singleNodePushTile(instance: String): View {
+        val push = com.callagent.host.push.PushRegistration.status(this, instance)
+        val path = com.callagent.host.push.PushProbe.probe(instance)
+            ?.let { NodeRowPresenter.pushPath(it, android.os.SystemClock.elapsedRealtime()) }
+        return HostUi.tile(this, HostUi.Position.FIRST, "推送",
+            summary = listOfNotNull(NodeRowPresenter.pushShort(push), path).joinToString(" · "),
+            icon = R.drawable.ic_ui_refresh,
+            onClick = { retryPush() }).apply { id = R.id.settings_node_push }
     }
 
     private fun showNodeDetails(key: String) {
@@ -3072,7 +3123,8 @@ class MainActivity : AppCompatActivity() {
                         statusMessage = "旧手机的 SIM 绑定已变化，发送前请重新选择 SIM。"
                     }
                     if (statusMessage == REFRESHING_STATUS || statusMessage.startsWith(OFFLINE_STATUS_PREFIX)) statusMessage = ""
-                    showDashboard()
+                    gateway = database.loadGateway() ?: gateway
+                    if (!refreshSettingsInPlace()) showDashboard()
                 }
             } catch (failure: Exception) {
                 mainHandler.post {
