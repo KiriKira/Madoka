@@ -124,7 +124,10 @@ import com.callagent.host.mesh.HostNodes
 import com.callagent.host.mesh.JoinEntry
 import com.callagent.host.mesh.JoinLink
 import com.callagent.host.mesh.NodeMonitor
+import com.callagent.host.contacts.ContactDirectory
 import com.callagent.host.contacts.ContactEntry
+import com.callagent.host.contacts.ContactPerson
+import com.callagent.host.ui.ContactPickerView
 import com.callagent.host.contacts.HostContactsRepository
 import androidx.core.util.Consumer
 import java.io.IOException
@@ -174,7 +177,6 @@ class MainActivity : AppCompatActivity() {
     private var navigation = HostNavigationState()
     private var draftSimId: String? = null
     private var composerTransfer: Pair<String, String>? = null
-    private var contactsQueryGeneration = 0L
     private var phoneContactsGeneration = 0L
     private var smsThreadVisibleCount = 100
     private var smsConversationVisibleCount = 100
@@ -187,8 +189,16 @@ class MainActivity : AppCompatActivity() {
     private var callHistory: List<RemoteCall> = emptyList()
     private var callHistoryCursor: String? = null
     private var callHistoryLoading = false
-    private var contactsQuery = ""
-    private var dialerContacts: List<ContactEntry> = emptyList()
+    /** This phone's contacts A to Z, for names and for the dialer and new-message pickers. */
+    private var contactPeople: List<ContactPerson> = emptyList()
+    private var contactsLoadGeneration = 0L
+    private var contactsLoaded = false
+    private var recipientContactsUpdate: (() -> Unit)? = null
+    /**
+     * One picker for the activity's lifetime, like the bottom bar: its rows
+     * are built once per phone book instead of on every render.
+     */
+    private var contactPicker: ContactPickerView? = null
     private var dialerCallButton: MaterialButton? = null
     private var dialerReadinessText: TextView? = null
     private var smsThreadSendButton: MaterialButton? = null
@@ -220,6 +230,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingDialAfterMicGrant: (() -> Unit)? = null
     private var selectedRestoreSimId: String? = null
     private var savedScrollY = 0
+    /** The screen the current window tree was built for; see [replaceContentInPlace]. */
+    private var installedNavigation: HostNavigationState? = null
     private var savedTopScrollY = 0
     private var savedBottomScrollY = 0
     private var restoreImeVisible = false
@@ -273,7 +285,7 @@ class MainActivity : AppCompatActivity() {
                 CallRuntime.ACTION_STATE_CHANGED -> renderCurrentScreen()
                 NodeMonitor.ACTION_NODE_CHANGED -> if (sessionStore.read()?.sameSessionInstance(session ?: return) != true) {
                     showCurrentSession("")
-                } else if (navigation.tab == HostTab.SETTINGS) {
+                } else if (navigation.tab == HostTab.SETTINGS && !refreshSettingsInPlace()) {
                     renderCurrentScreen()
                 }
             }
@@ -423,6 +435,8 @@ class MainActivity : AppCompatActivity() {
         }
         CallRuntime.setAppVisible(this, true)
         if (session != null) refreshCallAvailability()
+        // Contacts may have changed while the app was away.
+        loadContacts()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -579,7 +593,12 @@ class MainActivity : AppCompatActivity() {
         } else if (requestCode == REQUEST_CALL_NOTIFICATIONS) {
             renderCurrentScreen()
         } else if (requestCode == REQUEST_CONTACTS) {
-            if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) dialerContacts = emptyList()
+            if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+                contactPeople = emptyList()
+                contactsLoaded = false
+            } else {
+                loadContacts()
+            }
             renderCurrentScreen()
         }
     }
@@ -678,6 +697,7 @@ class MainActivity : AppCompatActivity() {
         callHistoryList = null
         dialerContactsList = null
         phoneContactsList = null
+        recipientContactsUpdate = null
         dialerCallButton = null
         dialerReadinessText = null
         smsThreadSendButton = null
@@ -1009,8 +1029,41 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun contactName(number: String): String? {
-        val normalized = normalizeDialNumber(number)
-        return dialerContacts.firstOrNull { normalizeDialNumber(it.normalizedNumber ?: it.number) == normalized }?.name
+        return ContactDirectory.nameFor(contactPeople, number)
+    }
+
+    /** Reads the phone book in the background; the page updates only if it changed. */
+    private fun loadContacts() {
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return
+        val generation = ++contactsLoadGeneration
+        contactsRepository.directoryAsync { result ->
+            if (isDestroyed || generation != contactsLoadGeneration) return@directoryAsync
+            val loaded = result.getOrNull() ?: return@directoryAsync
+            val changed = !contactsLoaded || loaded != contactPeople
+            contactsLoaded = true
+            contactPeople = loaded
+            contactPicker?.setPeople(loaded)
+            recipientContactsUpdate?.invoke()
+            // Names now resolve in history, threads and headers; the pickers update themselves.
+            if (changed && navigation.destination !is HostDestination.Dialer && !isNewConversation()) renderCurrentScreen()
+        }
+    }
+
+    private fun isNewConversation(): Boolean = (navigation.destination as? HostDestination.Conversation)?.isNew == true
+
+    /**
+     * The shared phone book, moved into [container]. [onPick] receives the
+     * chosen number; the query starts at [query].
+     */
+    private fun attachContactPicker(container: LinearLayout, query: String, onPick: (ContactPerson, ContactEntry) -> Unit): ContactPickerView {
+        val picker = contactPicker ?: ContactPickerView(this).also { contactPicker = it }
+        (picker.parent as? ViewGroup)?.removeView(picker)
+        if (contactsLoaded) picker.setPeople(contactPeople)
+        picker.setQuery(query)
+        picker.onPick = onPick
+        container.addView(picker, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        if (!contactsLoaded) loadContacts()
+        return picker
     }
 
     private fun renderSmsThreads() {
@@ -1161,25 +1214,7 @@ class MainActivity : AppCompatActivity() {
                 id = R.id.settings_device_list
                 orientation = LinearLayout.VERTICAL
             }
-            when {
-                pairedHostsAvailable == false -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, "当前服务器不提供设备列表。", icon = R.drawable.ic_ui_device))
-                pairedHosts.isEmpty() -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, pairedHostsRefreshIssue ?: "暂无设备记录。", icon = R.drawable.ic_ui_device))
-                else -> {
-                    // A re-paired phone leaves its old pairing behind on the node:
-                    // list only pairings that still sign in, this phone first.
-                    val now = System.currentTimeMillis()
-                    val shown = pairedHosts.filter { it.inUse(now) }.sortedByDescending { it.isSelf }
-                    shown.forEachIndexed { index, host ->
-                        devices.addView(HostUi.tile(this, HostUi.position(index, shown.size),
-                            title = host.name,
-                            summary = if (host.isSelf) "此手机" else host.pairingStateLabel(),
-                            icon = R.drawable.ic_ui_device))
-                    }
-                    (pairedHosts.size - shown.size).takeIf { it > 0 }?.let { hidden ->
-                        devices.addView(caption("另有 $hidden 条不再使用的配对未显示"))
-                    }
-                }
-            }
+            fillPairedDevices(devices)
             content.addView(devices)
             content.addView(HostUi.groupHeader(this, "旧手机与 SIM 卡"))
             content.addView(gatewayStatusCard(compact = false))
@@ -1196,6 +1231,70 @@ class MainActivity : AppCompatActivity() {
             content.addView(HostUi.groupHeader(this, "后台接收"))
             addBackgroundReceptionSettings(content)
         }
+        addStandbyAndBackupSettings(content)
+        settingsMessage = null
+    }
+
+    /**
+     * Brings a visible paired Settings page up to date without rebuilding it.
+     * A rebuild replaces the scroll view, which draws a frame at the top
+     * before the old position returns: with node probes and the 30-second
+     * sync landing here, the page kept jumping. Returns false when the page
+     * is not showing or its structure changed, and a full render is needed.
+     */
+    private fun refreshSettingsInPlace(): Boolean {
+        if (navigation.tab != HostTab.SETTINGS || navigation.destination != HostDestination.Home) return false
+        if (session == null || settingsMessage != null) return false
+        val host = adaptiveHost ?: return false
+        val devices = host.findViewById<LinearLayout>(R.id.settings_device_list) ?: return false
+        val nodes = HostNodes.nodes(this)
+        val nodeList = host.findViewById<NodeListView>(R.id.settings_node_list)
+        val pushTile = host.findViewById<View>(R.id.settings_node_push)
+        if (nodes.size >= 2) {
+            if (nodeList == null || !nodeList.submit(serverNodeRows(nodes))) return false
+        } else {
+            if (nodeList != null) return false
+            val instance = session?.sessionInstanceId
+            if ((pushTile == null) != (instance == null)) return false
+            if (pushTile != null && instance != null) replaceInParent(pushTile, singleNodePushTile(instance))
+        }
+        devices.removeAllViews()
+        fillPairedDevices(devices)
+        refreshGatewayStatusCard()
+        refreshBackgroundStatus()
+        return true
+    }
+
+    private fun replaceInParent(current: View, replacement: View) {
+        val parent = current.parent as? ViewGroup ?: return
+        val index = parent.indexOfChild(current)
+        parent.removeViewAt(index)
+        parent.addView(replacement, index)
+    }
+
+    private fun fillPairedDevices(devices: LinearLayout) {
+        when {
+            pairedHostsAvailable == false -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, "当前服务器不提供设备列表。", icon = R.drawable.ic_ui_device))
+            pairedHosts.isEmpty() -> devices.addView(HostUi.tile(this, HostUi.Position.SINGLE, pairedHostsRefreshIssue ?: "暂无设备记录。", icon = R.drawable.ic_ui_device))
+            else -> {
+                // A re-paired phone leaves its old pairing behind on the node:
+                // list only pairings that still sign in, this phone first.
+                val now = System.currentTimeMillis()
+                val shown = pairedHosts.filter { it.inUse(now) }.sortedByDescending { it.isSelf }
+                shown.forEachIndexed { index, host ->
+                    devices.addView(HostUi.tile(this, HostUi.position(index, shown.size),
+                        title = host.name,
+                        summary = if (host.isSelf) "此手机" else host.pairingStateLabel(),
+                        icon = R.drawable.ic_ui_device))
+                }
+                (pairedHosts.size - shown.size).takeIf { it > 0 }?.let { hidden ->
+                    devices.addView(caption("另有 $hidden 条不再使用的配对未显示"))
+                }
+            }
+        }
+    }
+
+    private fun addStandbyAndBackupSettings(content: LinearLayout) {
         content.addView(HostUi.groupHeader(this, "待机与省电"))
         val sleepy = com.callagent.host.calls.StandbyPowerPolicy.sleepyListening(this)
         content.addView(HostUi.tile(this, HostUi.Position.FIRST, "省电接听",
@@ -1249,7 +1348,6 @@ class MainActivity : AppCompatActivity() {
             onClick = { startActivity(Intent(this, com.callagent.host.backup.HostFullBackupActivity::class.java)) }
         ).apply { id = R.id.full_backup_entry })
         content.addView(smsArchiveEntryButton())
-        settingsMessage = null
     }
 
     private fun addBackgroundReceptionSettings(content: LinearLayout) {
@@ -1320,20 +1418,9 @@ class MainActivity : AppCompatActivity() {
         com.callagent.host.push.PushProbe.refreshIfStale(this)
         val nodes = HostNodes.nodes(this)
         if (nodes.size < 2) {
-            session?.sessionInstanceId?.let { instance ->
-                val push = com.callagent.host.push.PushRegistration.status(this, instance)
-                val path = com.callagent.host.push.PushProbe.probe(instance)
-                    ?.let { NodeRowPresenter.pushPath(it, android.os.SystemClock.elapsedRealtime()) }
-                content.addView(HostUi.tile(this, HostUi.Position.FIRST, "推送",
-                    summary = listOfNotNull(NodeRowPresenter.pushShort(push), path).joinToString(" · "),
-                    icon = R.drawable.ic_ui_refresh,
-                    onClick = { retryPush() }).apply { id = R.id.settings_node_push })
-            }
+            session?.sessionInstanceId?.let { instance -> content.addView(singleNodePushTile(instance)) }
         } else {
-            val push = nodes.associate { it.key to com.callagent.host.push.PushRegistration.status(this, it.sessionInstanceId) }
-            val probes = nodes.mapNotNull { node -> com.callagent.host.push.PushProbe.probe(node.sessionInstanceId)?.let { node.key to it } }.toMap()
-            val rows = NodeRowPresenter.rows(nodes, HostNodes.health(this), HostNodes.activeNode(this)?.key, push, probes)
-            content.addView(NodeListView(this, rows,
+            content.addView(NodeListView(this, serverNodeRows(nodes),
                 onReorder = { order ->
                     if (HostNodes.reorder(this, order)) probeNodes(force = true)
                     // Re-render after the drag gesture has fully finished.
@@ -1356,6 +1443,23 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(HostUi.tile(this, addPosition, "添加服务器节点",
             icon = R.drawable.ic_ui_add, onClick = { showAddNodeDialog() }).apply { id = R.id.settings_nodes_add })
+    }
+
+    private fun serverNodeRows(nodes: List<com.callagent.host.mesh.HostNode>): List<com.callagent.host.ui.NodeRow> {
+        val push = nodes.associate { it.key to com.callagent.host.push.PushRegistration.status(this, it.sessionInstanceId) }
+        val probes = nodes.mapNotNull { node -> com.callagent.host.push.PushProbe.probe(node.sessionInstanceId)?.let { node.key to it } }.toMap()
+        return NodeRowPresenter.rows(nodes, HostNodes.health(this), HostNodes.activeNode(this)?.key, push, probes)
+    }
+
+    /** The single-node push tile; [refreshSettingsInPlace] swaps it for a fresh one. */
+    private fun singleNodePushTile(instance: String): View {
+        val push = com.callagent.host.push.PushRegistration.status(this, instance)
+        val path = com.callagent.host.push.PushProbe.probe(instance)
+            ?.let { NodeRowPresenter.pushPath(it, android.os.SystemClock.elapsedRealtime()) }
+        return HostUi.tile(this, HostUi.Position.FIRST, "推送",
+            summary = listOfNotNull(NodeRowPresenter.pushShort(push), path).joinToString(" · "),
+            icon = R.drawable.ic_ui_refresh,
+            onClick = { retryPush() }).apply { id = R.id.settings_node_push }
     }
 
     private fun showNodeDetails(key: String) {
@@ -1722,8 +1826,7 @@ class MainActivity : AppCompatActivity() {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 callDestination = s?.toString().orEmpty()
-                contactsQuery = callDestination
-                queryDialerContacts(contactsQuery)
+                if (contactPicker?.parent === dialerContactsList) contactPicker?.setQuery(callDestination)
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
@@ -1841,9 +1944,6 @@ class MainActivity : AppCompatActivity() {
         panel.addView(dialerReadinessText, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         updateDialButtonState()
         if (session != null && callServerAvailable == null) refreshCallAvailability()
-        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED && dialerContacts.isEmpty()) {
-            queryDialerContacts(contactsQuery)
-        }
         return panel
     }
 
@@ -1866,6 +1966,7 @@ class MainActivity : AppCompatActivity() {
             addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
 
+    /** Every contact A to Z above the pinned keypad, narrowed by the typed digits. */
     private fun renderDialerContacts() {
         val list = dialerContactsList ?: return
         list.removeAllViews()
@@ -1873,19 +1974,10 @@ class MainActivity : AppCompatActivity() {
             list.addView(body("允许访问联系人以查找姓名和号码。", selectable = false).apply { gravity = Gravity.CENTER })
             return
         }
-        val query = contactsQuery.trim()
-        val matching = dialerContacts.filter { query.isBlank() || HostContactsRepository.matches(it, query) }.take(3)
-        if (matching.isEmpty()) {
-            if (query.isNotBlank()) list.addView(body("没有匹配的联系人。", selectable = false).apply { gravity = Gravity.CENTER })
-            return
-        }
-        matching.forEachIndexed { index, entry ->
-            list.addView(contactTile(entry, HostUi.position(index, matching.size)) {
-                val number = entry.normalizedNumber?.takeIf { it.isNotBlank() } ?: entry.number
-                callDestination = normalizeDialNumber(number)
-                callDestinationEdit?.setText(callDestination)
-                callDestinationEdit?.setSelection(callDestination.length)
-            })
+        attachContactPicker(list, callDestination) { _, entry ->
+            callDestination = normalizeDialNumber(entry.normalizedNumber?.takeIf(String::isNotBlank) ?: entry.number)
+            callDestinationEdit?.setText(callDestination)
+            callDestinationEdit?.setSelection(callDestination.length)
         }
     }
 
@@ -1938,17 +2030,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun normalizeDialNumber(value: String): String = value.filter { it.isDigit() || it in "+*#" }
-
-    private fun queryDialerContacts(query: String?) {
-        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return
-        val generation = ++contactsQueryGeneration
-        contactsRepository.queryAsync(query) { result ->
-            if (isDestroyed || generation != contactsQueryGeneration || navigation.destination != HostDestination.Dialer) return@queryAsync
-            if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return@queryAsync
-            dialerContacts = result.getOrDefault(emptyList())
-            renderDialerContacts()
-        }
-    }
 
     private fun callReadiness(line: SimLine? = sims.firstOrNull { it.simId == selectedSimId }): CallReadiness.Result {
         val current = gateway
@@ -2045,12 +2126,18 @@ class MainActivity : AppCompatActivity() {
         content.addView(bar)
 
         val recipient = if (route.isNew) {
-            val recipientField = inputField("收件人号码", InputType.TYPE_CLASS_PHONE)
+            // A name finds the contact, a number is used as typed, as in the dialer.
+            val recipientField = inputField("收件人姓名或号码",
+                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PERSON_NAME)
             (recipientField.editText as TextInputEditText).apply {
                 id = R.id.sms_recipient
                 setSingleLine(true)
             }.also { content.addView(recipientField) }
         } else null
+        val recipientContacts = if (route.isNew) LinearLayout(this).apply {
+            id = R.id.sms_recipient_contacts
+            orientation = LinearLayout.VERTICAL
+        }.also { content.addView(it) } else null
         val line = sims.firstOrNull { it.simId == selectedSimId }
         val savedDraft = line?.let { database.loadDraft(it.simId) }
         val transferred = composerTransfer
@@ -2095,6 +2182,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         content.addView(smsConversationList)
+        if (recipient != null && recipientContacts != null) bindRecipientContacts(recipient, recipientContacts)
 
         val composer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -2168,8 +2256,20 @@ class MainActivity : AppCompatActivity() {
             minimumHeight = 0
             setOnClickListener {
                 val selected = sims.firstOrNull { it.simId == selectedSimId }
-                if (selected == null) showToast("请选择 SIM 卡。")
-                else confirmSend(selected, recipient?.text?.toString() ?: route.peer, bodyInput.text?.toString().orEmpty())
+                if (selected == null) {
+                    showToast("请选择 SIM 卡。")
+                    return@setOnClickListener
+                }
+                if (recipient != null) {
+                    val typed = recipient.text?.toString().orEmpty()
+                    val number = resolveRecipient(typed)
+                    if (number == null) {
+                        showToast("请从联系人中选择收件人，或输入号码。")
+                        return@setOnClickListener
+                    }
+                    if (number != typed) recipient.setText(number)
+                }
+                confirmSend(selected, recipient?.text?.toString() ?: route.peer, bodyInput.text?.toString().orEmpty())
             }
         }
         smsThreadSendButton = send
@@ -2177,6 +2277,58 @@ class MainActivity : AppCompatActivity() {
         composer.addView(inputRow)
         updateSendButtonState()
         return composer
+    }
+
+    /**
+     * Contact suggestions under the new-message recipient, the same phone
+     * book as the dialer. They follow what is typed and step aside once the
+     * recipient is a saved number, leaving the conversation area.
+     */
+    private fun bindRecipientContacts(recipient: EditText, container: LinearLayout) {
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            container.addView(smallButton("允许访问联系人以选择收件人").apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                setOnClickListener { requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS), REQUEST_CONTACTS) }
+            })
+            return
+        }
+        val picker = attachContactPicker(container, recipient.text?.toString().orEmpty()) { _, entry ->
+            val number = entry.normalizedNumber?.takeIf(String::isNotBlank) ?: entry.number
+            recipient.setText(number)
+            recipient.setSelection(number.length)
+            composeBody?.requestFocus()
+        }
+        val update = {
+            val typed = recipient.text?.toString().orEmpty()
+            // A saved number was chosen, or a number no contact has: nothing to suggest.
+            val done = ContactDirectory.isSavedNumber(contactPeople, typed) ||
+                typed.count(Char::isDigit) >= 3 && ContactDirectory.filter(contactPeople, typed).isEmpty()
+            picker.setQuery(typed)
+            container.visibility = if (done) View.GONE else View.VISIBLE
+            smsConversationList?.visibility = if (done) View.VISIBLE else View.GONE
+        }
+        recipientContactsUpdate = update
+        recipient.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (contactPicker === picker && picker.parent === container) update()
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        update()
+    }
+
+    /**
+     * The number to send to: a typed number as is, or the one number of the
+     * contact a typed name picks out. Null when a name is ambiguous or unknown.
+     */
+    private fun resolveRecipient(typed: String): String? {
+        val value = typed.trim()
+        if (value.isEmpty() || value.any(Char::isDigit)) return value
+        val matches = ContactDirectory.filter(contactPeople, value)
+        val person = matches.singleOrNull { it.name.equals(value, ignoreCase = true) } ?: matches.singleOrNull()
+        val entry = person?.numbers?.singleOrNull() ?: return null
+        return entry.normalizedNumber?.takeIf(String::isNotBlank) ?: entry.number
     }
 
     private fun conversationDay(value: String): String = runCatching {
@@ -3072,7 +3224,8 @@ class MainActivity : AppCompatActivity() {
                         statusMessage = "旧手机的 SIM 绑定已变化，发送前请重新选择 SIM。"
                     }
                     if (statusMessage == REFRESHING_STATUS || statusMessage.startsWith(OFFLINE_STATUS_PREFIX)) statusMessage = ""
-                    showDashboard()
+                    gateway = database.loadGateway() ?: gateway
+                    if (!refreshSettingsInPlace()) showDashboard()
                 }
             } catch (failure: Exception) {
                 mainHandler.post {
@@ -3485,6 +3638,7 @@ class MainActivity : AppCompatActivity() {
         spacer: View? = null,
         fixedBottomView: View? = null,
     ) {
+        if (panels == null && replaceContentInPlace(content, fixedBottomView)) return
         val previousScrollY = mainScroll?.scrollY ?: savedScrollY
         val previousTopY = horizontalTopScroll?.scrollY ?: savedTopScrollY
         val previousBottomY = horizontalBottomScroll?.scrollY ?: savedBottomScrollY
@@ -3520,12 +3674,7 @@ class MainActivity : AppCompatActivity() {
         host.addView(scroll, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         fixedBottomView?.let { fixed ->
             host.addView(fixed, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
-            val updateClearance = {
-                val bottom = fixed.height + dp(12)
-                if (scroll.paddingBottom != bottom) scroll.setPadding(scroll.paddingLeft, scroll.paddingTop, scroll.paddingRight, bottom)
-            }
-            fixed.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateClearance() }
-            fixed.post { updateClearance() }
+            keepClearOf(scroll, fixed)
         }
         ViewCompat.setOnApplyWindowInsetsListener(host) { view, windowInsets ->
             val bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -3572,6 +3721,7 @@ class MainActivity : AppCompatActivity() {
         savedBottomScrollY = previousBottomY
 
         setContentView(host)
+        installedNavigation = navigation
         ViewCompat.requestApplyInsets(host)
         host.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
             if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
@@ -3587,6 +3737,59 @@ class MainActivity : AppCompatActivity() {
                 restoreInputFocusIfNeeded()
             }
         }
+    }
+
+    /** Pads [scroll] so its end can scroll above the pinned [fixed] bar. */
+    private fun keepClearOf(scroll: ScrollView, fixed: View) {
+        val updateClearance = {
+            val bottom = fixed.height + dp(12)
+            if (scroll.paddingBottom != bottom) scroll.setPadding(scroll.paddingLeft, scroll.paddingTop, scroll.paddingRight, bottom)
+        }
+        fixed.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateClearance() }
+        fixed.post { updateClearance() }
+    }
+
+    /**
+     * Re-rendering the screen already shown swaps the page's content inside
+     * the existing scroll view instead of building a new window tree. A new
+     * tree draws its first frame scrolled to the top at full width and only
+     * then gets its position and width back, so every refresh (sync, node
+     * probes, call state) made the page jump. Here the scroll position, the
+     * width cap and the pinned bar's place carry over to the same frame.
+     * Returns false when there is no such page to reuse.
+     */
+    private fun replaceContentInPlace(content: LinearLayout, fixedBottomView: View?): Boolean {
+        val host = adaptiveHost ?: return false
+        val scroll = mainScroll ?: return false
+        val old = currentContent ?: return false
+        val centered = old.parent as? FrameLayout ?: return false
+        if (installedNavigation != navigation || currentPanels != null || horizontalTopScroll != null) return false
+        if (!host.isAttachedToWindow || host.width <= 0 || scroll.parent !== host || centered.parent !== scroll) return false
+        val contentParams = FrameLayout.LayoutParams(old.layoutParams as FrameLayout.LayoutParams)
+        centered.removeView(old)
+        centered.addView(content, contentParams)
+        val oldFixed = fixedBottomChrome
+        if (oldFixed !== fixedBottomView) {
+            val fixedParams = (oldFixed?.layoutParams as? FrameLayout.LayoutParams)?.let { FrameLayout.LayoutParams(it) }
+                ?: FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
+            if (oldFixed?.parent === host) host.removeView(oldFixed)
+            if (fixedBottomView != null) {
+                (fixedBottomView.parent as? ViewGroup)?.removeView(fixedBottomView)
+                host.addView(fixedBottomView, fixedParams)
+                keepClearOf(scroll, fixedBottomView)
+            } else if (scroll.paddingBottom != 0) {
+                scroll.setPadding(scroll.paddingLeft, scroll.paddingTop, scroll.paddingRight, 0)
+            }
+        }
+        currentContent = content
+        fixedBottomChrome = fixedBottomView
+        fixedBottomChromeIsComposer = navigation.destination is HostDestination.Conversation ||
+            navigation.destination == HostDestination.Dialer
+        headerViews = emptyList()
+        // Width cap and pinned-bar placement before the next frame, not a post later.
+        updateAdaptiveLayout()
+        host.post { restoreInputFocusIfNeeded() }
+        return true
     }
 
     private fun updateAdaptiveLayout() {

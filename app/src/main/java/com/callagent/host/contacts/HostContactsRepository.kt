@@ -59,6 +59,24 @@ class HostContactsRepository private constructor(
         }
     }
 
+    /**
+     * Reads every contact with a number and files it A to Z on the worker,
+     * then delivers the phone book on the main thread.
+     */
+    fun directoryAsync(callback: (Result<List<ContactPerson>>) -> Unit) {
+        worker.execute {
+            val result = runCatching {
+                if (!hasReadPermission()) emptyList()
+                else try {
+                    ContactDirectory.people(readContacts(null))
+                } catch (_: SecurityException) {
+                    emptyList()
+                }
+            }
+            callbackExecutor.execute { callback(result) }
+        }
+    }
+
     companion object {
         /**
          * Synchronous single-number lookup for notifications. Returns null

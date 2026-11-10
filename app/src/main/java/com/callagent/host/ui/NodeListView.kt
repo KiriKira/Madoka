@@ -12,6 +12,7 @@ import androidx.core.view.ViewCompat
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.SimpleItemAnimator
 import com.callagent.host.mesh.HostNode
 import com.callagent.host.mesh.NodeHealth
 import com.callagent.host.push.NodePushStatus
@@ -177,6 +178,8 @@ class NodeListView(
         isNestedScrollingEnabled = false
         overScrollMode = OVER_SCROLL_NEVER
         adapter = RowAdapter()
+        // A status refresh rebinds rows in place; the default cross-fade made them blink.
+        (itemAnimator as? SimpleItemAnimator)?.supportsChangeAnimations = false
         touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: ViewHolder, target: ViewHolder): Boolean {
                 move(viewHolder.bindingAdapterPosition, target.bindingAdapterPosition)
@@ -187,15 +190,46 @@ class NodeListView(
 
             override fun isLongPressDragEnabled(): Boolean = true
 
+            override fun onSelectedChanged(viewHolder: ViewHolder?, actionState: Int) {
+                super.onSelectedChanged(viewHolder, actionState)
+                if (actionState == ItemTouchHelper.ACTION_STATE_DRAG) dragging = true
+            }
+
             override fun clearView(recyclerView: RecyclerView, viewHolder: ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
+                dragging = false
                 commitOrder()
+                // A reorder re-renders the page; otherwise show what arrived mid-drag.
+                pendingRows?.let { pendingRows = null; submit(it) }
             }
         })
         touchHelper.attachToRecyclerView(this)
     }
 
     private var orderAtDragStart: List<String> = items.map { it.key }
+    private var dragging = false
+    private var pendingRows: List<NodeRow>? = null
+
+    /**
+     * Shows new state for the same nodes without replacing the list, so a
+     * periodic probe does not rebuild (and jump) the whole settings page.
+     * Mid-drag the rows wait until the drag ends. Returns false when the
+     * node set or order differs; the caller then re-renders the page.
+     */
+    fun submit(rows: List<NodeRow>): Boolean {
+        if (dragging) {
+            pendingRows = rows
+            return true
+        }
+        if (rows.map { it.key } != items.map { it.key }) return false
+        rows.forEachIndexed { index, row ->
+            if (items[index] != row) {
+                items[index] = row
+                adapter?.notifyItemChanged(index)
+            }
+        }
+        return true
+    }
 
     private fun move(from: Int, to: Int) {
         if (from == NO_POSITION || to == NO_POSITION || from == to) return
