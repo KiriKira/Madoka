@@ -206,6 +206,21 @@ class NodeListView(
         touchHelper.attachToRecyclerView(this)
     }
 
+    /**
+     * Always as tall as all its rows. The page's ScrollView measures it as
+     * "unspecified" but still passes the viewport height left below the
+     * header as a size hint, and LinearLayoutManager stops laying out rows
+     * once they fill that hint. With five nodes the last row fell just past
+     * it whenever a row grew a line, and stayed missing until rows shrank
+     * again. A zero-size unspecified spec makes the layout manager lay out
+     * every row; this list never scrolls on its own.
+     */
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        val height = if (MeasureSpec.getMode(heightSpec) == MeasureSpec.EXACTLY) heightSpec
+            else MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED)
+        super.onMeasure(widthSpec, height)
+    }
+
     private var orderAtDragStart: List<String> = items.map { it.key }
     private var dragging = false
     private var pendingRows: List<NodeRow>? = null
