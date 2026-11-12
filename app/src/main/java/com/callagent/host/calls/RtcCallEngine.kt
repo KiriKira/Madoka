@@ -90,6 +90,7 @@ internal class RtcCallEngine(
 
     override fun connect() {
         if (!started.compareAndSet(false,true)) return
+        runCatching{configureRelayNodes()}
         networkRegistered = runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); true }.getOrDefault(false)
         if (hasNetwork()) updateContinuousLease()
         systemWake()
@@ -300,6 +301,8 @@ internal class RtcCallEngine(
             } else null
         }
         retired?.close()
+        if(state==EngineCallState.INCOMING)prefetchRelays(id)
+        if(state in TERMINAL)relayPrefetches.remove(id)?.cancel(true)
         updateContinuousLease()
         Log.i("GsmRtc","media=webrtc call_control=rtc call_id=$id event=control_${state.name.lowercase()}")
         com.callagent.host.data.HostRunLog.add("RTC","call=${id.take(8)} control_${state.name.lowercase()}"+
@@ -307,10 +310,20 @@ internal class RtcCallEngine(
         listener.onCallState(EngineCallSnapshot(id,direction(snapshot),state,serverCallId=id,
             terminalReason=snapshot.optString("reason").takeIf{it.isNotBlank()}))
     }
+    private val relayPrefetch=Executors.newSingleThreadExecutor { r->Thread(r,"RTC-Relay-Prefetch") }
+    private val relayPrefetches=ConcurrentHashMap<String,java.util.concurrent.Future<*>>()
+    private var relayNodeId:String?=null
+    private fun configureRelayNodes(){relayNodeId=com.callagent.host.data.RelayNodeSources.configure(context,sessionInstanceId)}
+    private fun prefetchRelays(id:String){
+        if(relayPrefetches.containsKey(id))return
+        val owner=runCatching{val node=com.callagent.host.mesh.HostNodes.nodes(context).firstOrNull{it.sessionInstanceId==sessionInstanceId};node?.let{com.callagent.host.mesh.HostNodes.sessionFor(context,it)}?.ownerId ?: com.callagent.host.data.SessionStore(context).read()?.takeIf{sessionInstanceId==null||it.sessionInstanceId==sessionInstanceId}?.ownerId}.getOrNull()?:return
+        runCatching{relayPrefetches[id]=relayPrefetch.submit {runCatching{configureRelayNodes();RelayRepository.resolve(context,owner)}}}
+    }
     private fun newSession(id:String):RtcAudioSession{
         val admission=RtcAudioSession.select(api,id)
+        configureRelayNodes()
         check(admission.getString("call_control")=="rtc"){"Server call control required"}
-        return RtcAudioSession(context,admission,api,false,pcmForCall?.invoke(id),onReady={report(id)},
+        return RtcAudioSession(context,admission,api,false,pcmForCall?.invoke(id),additionalRelaySources=RelayRepository.resolve(context,admission.getJSONObject("binding").getString("owner_id"),currentNodeId=relayNodeId,nodeServers=RelayRepository.servers(admission.getJSONArray("ice_servers"))),forceRelay=com.callagent.host.BuildConfig.FORCE_RTC_RELAY,currentRelayNodeId=relayNodeId,onReady={report(id)},
             onLog={line->com.callagent.host.data.HostRunLog.add("MEDIA",line.substringAfter("call_id=").let{"call=${it.take(8)} ${line.substringAfter(" event=","")}"})},
             onFailure={reason->handleMediaFailure(id,reason)})
     }
@@ -493,6 +506,7 @@ internal class RtcCallEngine(
         }
     }
     override fun close(){
+        relayPrefetches.values.forEach{it.cancel(true)};relayPrefetches.clear();relayPrefetch.shutdownNow()
         if(!closed.compareAndSet(false,true))return
         polling.close()
         synchronized(budgetGuard) { activeBudgets.forEach { it.close() }; activeBudgets.clear() }

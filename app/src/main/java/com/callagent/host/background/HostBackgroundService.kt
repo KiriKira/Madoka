@@ -183,6 +183,7 @@ class HostBackgroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        com.callagent.rtcmedia.NodeControlSocket.unlisten("madoka-background")
         generation.incrementAndGet()
         closeWebSocket()
         unregisterConnectivityCallback()
@@ -332,6 +333,7 @@ class HostBackgroundService : Service() {
         generation.incrementAndGet()
         closeWebSocket()
         reconnectAttempt.set(0)
+        reconnectNotBefore=0L
         activeSession = session
         scheduler.execute {
             enqueueSync()
@@ -444,6 +446,17 @@ class HostBackgroundService : Service() {
     /** Opens or closes the socket as [pushCovers] now says. */
     private fun reconcileWebSocket() {
         val session = runCatching { sessionStore.read() }.getOrNull()
+        if(session!=null && com.callagent.rtcmedia.NodeControlSocket.live(session.apiBaseUrl,session.accessToken)){
+            com.callagent.rtcmedia.NodeControlSocket.listen(session.apiBaseUrl,"madoka-background"){
+                if(isOptedInAndPaired()&&sessionStore.read()?.sameSessionInstance(session)==true){
+                    CallRuntime.requestCallSyncFromWakeHint()
+                    runCatching{com.callagent.host.push.PushWakeHandoff.begin(this,session.sessionInstanceId,com.callagent.host.push.PushWakeHandoff.Channel.SYNC)}
+                    enqueueSync("control_socket")
+                }
+            }
+            if(socket!=null)closeWebSocket()
+            CallRuntime.wakeChannelLive=true;setConnection("Live updates connected");return
+        }
         if (pushCovers(session)) {
             if (socket != null) {
                 com.callagent.host.data.StandbyDiagnostics.event("wss_push_covers")
@@ -453,26 +466,30 @@ class HostBackgroundService : Service() {
         } else if (socket == null) ensureWebSocket()
     }
 
+    @Volatile private var reconnectNotBefore=0L
     private fun ensureWebSocket() {
+        if(SystemClock.elapsedRealtime()<reconnectNotBefore)return
         if (!com.callagent.host.network.NetworkEnvironment.online(this)) return
         synchronized(webSocketLock) {
             if (!isOptedInAndPaired() || socket != null) return
             val session = sessionStore.read() ?: return
+            if(com.callagent.rtcmedia.NodeControlSocket.live(session.apiBaseUrl,session.accessToken)){reconcileWebSocket();return}
             if (pushCovers(session)) { setConnection("Push wake-ups"); return }
             val expectedGeneration = generation.get()
             // A reception v2 node pings at the interval asked for, and alone.
             val heartbeatRoot = session.apiBaseUrl.takeIf { com.callagent.host.calls.ReceptionV2.active(this, session) }
+            val clientPings=com.callagent.rtcmedia.NodeControlSocket.supports(session.apiBaseUrl,"client_ping_v1")
             val request = try {
                 Request.Builder()
                     .url(hostWakeWebSocketUrl(session.apiBaseUrl))
                     .header("Authorization", "Bearer ${session.accessToken}")
-                    .apply { heartbeatRoot?.let { header("Wake-Ping-Seconds", WakeHeartbeat.seconds(this@HostBackgroundService, it).toString()) } }
+                    .apply { if(!clientPings)heartbeatRoot?.let { header("Wake-Ping-Seconds", WakeHeartbeat.seconds(this@HostBackgroundService, it).toString()) } }
                     .build()
             } catch (_: Exception) {
                 scheduleReconnectWithBackoff()
                 return
             }
-            val client = if (heartbeatRoot != null) wsClient.newBuilder().pingInterval(0, TimeUnit.SECONDS).build() else wsClient
+            val client = if(clientPings) wsClient.newBuilder().pingInterval(heartbeatRoot?.let{WakeHeartbeat.seconds(this@HostBackgroundService,it).toLong()}?:25L,TimeUnit.SECONDS).build() else if (heartbeatRoot != null) wsClient.newBuilder().pingInterval(0, TimeUnit.SECONDS).build() else wsClient
             fun heartbeatEnded(failed: Boolean) {
                 val openedAt = socketOpenedAt
                 if (heartbeatRoot != null && openedAt != 0L) WakeHeartbeat.ended(this@HostBackgroundService, heartbeatRoot,
@@ -534,6 +551,7 @@ class HostBackgroundService : Service() {
                     setConnection("Periodic HTTPS sync")
                     if (code == 1008) {
                         authReconnectPending.set(true)
+                        scheduleReconnectWithBackoff()
                         enqueueSync()
                         return
                     }
@@ -548,12 +566,18 @@ class HostBackgroundService : Service() {
                 if (current) heartbeatEnded(failed = response == null)
                 clearSocket(webSocket)
                 if (!current) return
+                if(response?.code==429){
+                    val seconds=response.header("Retry-After")?.toLongOrNull()?.coerceIn(1,86400)?:60L
+                    com.callagent.rtcmedia.NodeControlSocket.rateLimited(session.apiBaseUrl,seconds)
+                    scheduleWebSocketReconnect(seconds*1000);return
+                }
                 // A 401/1008 close is repaired by HTTPS token refresh in the next sync before reconnect.
                 setConnection("Periodic HTTPS sync")
                 // The active node may be gone (a VPN dropped): check now, not on the next timer.
                 forceNodeProbe.set(true)
                 if (response?.code == 401) {
                     authReconnectPending.set(true)
+                    scheduleReconnectWithBackoff()
                     enqueueSync()
                     return
                 }
@@ -605,9 +629,11 @@ class HostBackgroundService : Service() {
     private fun scheduleWebSocketReconnect(delayMs: Long) {
         if (!isOptedInAndPaired()) return
         val expectedGeneration = generation.get()
+        val waitMillis=maxOf(delayMs, reconnectNotBefore-SystemClock.elapsedRealtime()).coerceAtLeast(500L)
+        reconnectNotBefore=SystemClock.elapsedRealtime()+waitMillis
         scheduler.schedule({
             if (expectedGeneration == generation.get() && socket == null && isOptedInAndPaired()) ensureWebSocket()
-        }, delayMs.coerceAtLeast(500L), TimeUnit.MILLISECONDS)
+        }, waitMillis, TimeUnit.MILLISECONDS)
     }
 
     private fun registerConnectivityCallback() {

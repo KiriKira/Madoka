@@ -83,27 +83,32 @@ object NodeMonitor {
             val previous = HostNodes.health(app)
             val usable = nodes.filter { HostNodes.sessionFor(app, it) != null }.map { it.key }.toSet()
             val active = HostNodes.activeNode(app)?.key
-            val probes = nodes.associate { node ->
-                node.key to probeWorkers.submit<NodeObservation> {
-                    if (node.key !in usable) {
-                        NodeObservation(reachable = false, gatewayOnline = false, rttMillis = null, issue = "需要重新配对")
-                    } else {
-                        val first = com.callagent.host.data.StandbyDiagnostics.withCause("node_probe") { probe(app, node, installId) }
-                        if (node.key == active && !NodeSelectionPolicy.healthy(first)) {
-                            SystemClock.sleep(CONFIRM_DELAY_MS)
-                            com.callagent.host.data.StandbyDiagnostics.withCause("node_probe") { probe(app, node, installId) }
-                        } else first
-                    }
+            // Ordinary nodes remain parallel. Explicit cold standbys wait for the active
+            // result; a failed primary activates them in this same evaluation round.
+            val cold=nodes.filter { node -> !force && node.key!=active && previous[active]?.healthy==true &&
+                com.callagent.rtcmedia.NodeControlSocket.supports(node.apiBaseUrl,"cold_standby_v1") && previous[node.key]?.healthy==true }.map{it.key}.toSet()
+            fun submit(node:HostNode)=probeWorkers.submit<NodeObservation> {
+                if(node.key !in usable) NodeObservation(false,false,null,issue="需要重新配对")
+                else {
+                    val first=com.callagent.host.data.StandbyDiagnostics.withCause("node_probe"){probe(app,node,installId)}
+                    if(node.key==active && !NodeSelectionPolicy.healthy(first)){
+                        SystemClock.sleep(CONFIRM_DELAY_MS)
+                        com.callagent.host.data.StandbyDiagnostics.withCause("node_probe"){probe(app,node,installId)}
+                    } else first
                 }
             }
-            val updates = nodes.associate { node ->
-                val observation = probes.getValue(node.key).get()
-                node.key to NodeSelectionPolicy.record(previous[node.key], observation, System.currentTimeMillis())
+            val probes=nodes.filter{it.key !in cold}.associate{it.key to submit(it)}.toMutableMap()
+            val observations=probes.mapValues{it.value.get()}.toMutableMap()
+            if(active==null || observations[active]?.let(NodeSelectionPolicy::healthy)!=true){
+                nodes.filter{it.key in cold}.forEach{probes[it.key]=submit(it)}
+                cold.forEach{observations[it]=probes.getValue(it).get()}
             }
+            val updates=nodes.associate{node->node.key to if(node.key !in observations)previous.getValue(node.key)
+                else NodeSelectionPolicy.record(previous[node.key],observations.getValue(node.key),System.currentTimeMillis())}
             HostNodes.recordHealth(app, updates)
             val calling = callInProgress()
             val busy = calling || inFlightSubmissions.get() > 0
-            val target = NodeSelectionPolicy.choose(nodes.map { it.key }.filter { it in usable }, HostNodes.activeNode(app)?.key, updates, busy, calling)
+            val target = NodeSelectionPolicy.choose(nodes.map { it.key }.filter { it in usable && (it !in cold || it in observations) }, HostNodes.activeNode(app)?.key, updates, busy, calling)
             if (target != null) {
                 val switched = HostNodes.activate(app, target) ?: return null
                 announce(app, switched)

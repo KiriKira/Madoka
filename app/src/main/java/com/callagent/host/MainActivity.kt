@@ -1190,6 +1190,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderSettingsHome(content: LinearLayout) {
         content.addView(title("设置"))
+        content.addView(android.widget.Button(this).apply { text = "中继来源"; setOnClickListener { runCatching{com.callagent.host.data.RelayNodeSources.configure(this@MainActivity)};startActivity(android.content.Intent(this@MainActivity, com.callagent.rtcmedia.RelaySettingsActivity::class.java)) } })
         settingsMessage?.let { content.addView(messageCard(it, error = true)) }
         if (session == null) {
             content.addView(HostUi.groupHeader(this, "服务器与配对").apply { id = R.id.settings_pairing_section })

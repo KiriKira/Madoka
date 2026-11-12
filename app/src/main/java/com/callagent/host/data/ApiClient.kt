@@ -186,7 +186,7 @@ class ApiClient(
     fun getCall(callId: String): RemoteCall = parseCall(authenticatedRequest("GET", "/calls/${pathSegment(callId)}"))
 
     internal fun rtcRequest(method: String, path: String, body: JSONObject?): JSONObject {
-        require(path.matches(Regex("/(rtc/legs/[a-zA-Z0-9_-]+|rtc/control/(capability|calls(/[a-zA-Z0-9_-]+(/operations)?)?|incoming)|calls/[a-zA-Z0-9_-]+/media(/active)?)")))
+        require(path.matches(Regex("/(rtc/ice-servers|rtc/legs/[a-zA-Z0-9_-]+|rtc/control/(capability|calls(/[a-zA-Z0-9_-]+(/operations)?)?|incoming)|calls/[a-zA-Z0-9_-]+/media(/active)?)")))
         return try {
             if (method == "POST" && path == "/rtc/control/capability" && body?.has("enabled") == true && boundSession != null) {
                 if (sessionStore.read()?.sameSessionInstance(boundSession) != true) throw SessionChanged()
@@ -212,6 +212,10 @@ class ApiClient(
         catch (_: java.io.IOException) { throw com.callagent.rtcmedia.MediaApiException(503, "NETWORK_UNAVAILABLE") }
     }
 
+    internal fun relayCredentials(): JSONObject? {
+        val flags=request("GET","/capabilities",null,token=null,idempotencyKey=null)
+        return if(flags.optBoolean("ice_servers_v1"))rtcRequest("GET","/rtc/ice-servers",null) else null
+    }
     fun rtcControlAvailable(): Boolean = serverCapabilities().rtcCallControl
     fun rtcCall(callId: String): RemoteCall = parseCall(rtcRequest("GET", "/rtc/control/calls/${pathSegment(callId)}", null))
 
@@ -259,6 +263,7 @@ class ApiClient(
         return ServerCapabilities(json.optBoolean("rtc_call_control", false), json.optBoolean("push", false),
             (0 until items.length()).mapNotNull { items.optString(it).takeIf(String::isNotBlank) }.toSet())
             .also {
+                com.callagent.rtcmedia.NodeControlSocket.observed(apiRoot,it.extensions+if(json.optBoolean("ice_servers_v1"))setOf("ice_servers_v1")else emptySet())
                 ServerPushSignal.observed(apiRoot, it.push)
                 com.callagent.host.calls.RtcSleep.observed(apiRoot, json.optBoolean("rtc_sleep", false))
                 com.callagent.host.calls.ReceptionV2.observed(apiRoot, json.optBoolean("reception_v2", false))
@@ -380,6 +385,10 @@ class ApiClient(
     ): JSONObject {
         val budget = RequestBudget.current
         val remaining = budget?.remainingMillis()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
+        val socketToken=token?:if(path=="/auth/refresh")sessionStore.read()?.accessToken else null
+        if(socketToken!=null)try{
+            com.callagent.rtcmedia.NodeControlSocket.request(apiRoot,socketToken,method,path,body?:rawBody?.let{JSONObject(it)},remaining?.toLong()?:6000L,idempotencyKey)?.let{return it}
+        }catch(failure:com.callagent.rtcmedia.MediaApiException){throw ApiFailure(failure.status,failure.code,failure.status>=500||failure.status==429)}
         val requestStarted = System.nanoTime()
         var requestSucceeded = false
         var sentBytes = 0L
@@ -406,6 +415,7 @@ class ApiClient(
                 sentBytes = bytes.size.toLong()
             }
             val status = connection.responseCode
+            if(status==429)com.callagent.rtcmedia.NodeControlSocket.rateLimited(apiRoot,connection.getHeaderField("Retry-After")?.toLongOrNull()?:60L)
             if (status in 300..399) throw IOException("Server endpoint redirected; check the configured server URL")
             if (status !in 200..299) {
                 val errorBody = runCatching { connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } }.getOrNull()

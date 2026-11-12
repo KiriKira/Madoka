@@ -39,6 +39,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
+        buildConfigField("boolean", "FORCE_RTC_RELAY", "false")
         applicationId = "com.callagent.host"
         minSdk = 26
         targetSdk = 34
@@ -83,6 +84,10 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            buildConfigField("boolean", "FORCE_RTC_RELAY", providers.gradleProperty("forceRtcRelay").orElse("false").get().toBoolean().toString())
+            if(providers.gradleProperty("rtcEmulator").orElse("false").get().toBoolean())ndk { abiFilters += setOf("arm64-v8a","x86_64") }
+        }
         getByName("release") {
             isDebuggable = false
             isMinifyEnabled = false
