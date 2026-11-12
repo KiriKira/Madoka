@@ -89,7 +89,7 @@ class HostBackgroundService : Service() {
             // yet; the node's next ping can be minutes away. Switches come in
             // bursts (Wi-Fi, then VPN), so reconnect once they settle.
             if (socket != null && socketNetwork != null && socketNetwork != network) closeWebSocket()
-            scheduleWebSocketReconnect(NETWORK_SETTLE_MS)
+            scheduleWebSocketReconnect(NETWORK_SETTLE_MS, recovery = true)
         }
 
         override fun onLost(network: Network) {
@@ -292,9 +292,9 @@ class HostBackgroundService : Service() {
             if (latest != null && latest.sameSessionInstance(bound) && latest.accessToken != bound.accessToken) {
                 authReconnectPending.set(false)
                 closeWebSocket()
-                scheduleWebSocketReconnect(300L)
+                scheduleWebSocketReconnect(300L, recovery = true)
             } else if (authReconnectPending.compareAndSet(true, false)) {
-                scheduleWebSocketReconnect(300L)
+                scheduleWebSocketReconnect(300L, recovery = true)
             }
         } catch (_: SyncBudgetExhausted) {
             if (isCurrent(bound, expectedGeneration)) {
@@ -333,7 +333,8 @@ class HostBackgroundService : Service() {
         generation.incrementAndGet()
         closeWebSocket()
         reconnectAttempt.set(0)
-        reconnectNotBefore=0L
+        cancelWebSocketRetry()
+        retryAfterNotBefore=0L
         activeSession = session
         scheduler.execute {
             enqueueSync()
@@ -466,9 +467,13 @@ class HostBackgroundService : Service() {
         } else if (socket == null) ensureWebSocket()
     }
 
+    // Ordinary retries may be expedited by network/identity recovery; Retry-After may not.
     @Volatile private var reconnectNotBefore=0L
+    @Volatile private var retryAfterNotBefore=0L
+    private var reconnectFuture:java.util.concurrent.ScheduledFuture<*>?=null
+    private val reconnectTicket=AtomicLong()
     private fun ensureWebSocket() {
-        if(SystemClock.elapsedRealtime()<reconnectNotBefore)return
+        if(authReconnectPending.get()||SystemClock.elapsedRealtime()<maxOf(reconnectNotBefore,retryAfterNotBefore))return
         if (!com.callagent.host.network.NetworkEnvironment.online(this)) return
         synchronized(webSocketLock) {
             if (!isOptedInAndPaired() || socket != null) return
@@ -551,7 +556,7 @@ class HostBackgroundService : Service() {
                     setConnection("Periodic HTTPS sync")
                     if (code == 1008) {
                         authReconnectPending.set(true)
-                        scheduleReconnectWithBackoff()
+                        cancelWebSocketRetry()
                         enqueueSync()
                         return
                     }
@@ -569,7 +574,8 @@ class HostBackgroundService : Service() {
                 if(response?.code==429){
                     val seconds=response.header("Retry-After")?.toLongOrNull()?.coerceIn(1,86400)?:60L
                     com.callagent.rtcmedia.NodeControlSocket.rateLimited(session.apiBaseUrl,seconds)
-                    scheduleWebSocketReconnect(seconds*1000);return
+                    synchronized(webSocketLock){retryAfterNotBefore=maxOf(retryAfterNotBefore,SystemClock.elapsedRealtime()+seconds*1000)}
+                    scheduleWebSocketReconnect(seconds*1000,recovery=true);return
                 }
                 // A 401/1008 close is repaired by HTTPS token refresh in the next sync before reconnect.
                 setConnection("Periodic HTTPS sync")
@@ -577,7 +583,7 @@ class HostBackgroundService : Service() {
                 forceNodeProbe.set(true)
                 if (response?.code == 401) {
                     authReconnectPending.set(true)
-                    scheduleReconnectWithBackoff()
+                    cancelWebSocketRetry()
                     enqueueSync()
                     return
                 }
@@ -626,14 +632,30 @@ class HostBackgroundService : Service() {
         scheduleWebSocketReconnect(delay)
     }
 
-    private fun scheduleWebSocketReconnect(delayMs: Long) {
+    private fun cancelWebSocketRetry()=synchronized(webSocketLock){
+        reconnectTicket.incrementAndGet();reconnectFuture?.cancel(false);reconnectFuture=null;reconnectNotBefore=0L
+    }
+
+    private fun scheduleWebSocketReconnect(delayMs: Long, recovery:Boolean=false) {
         if (!isOptedInAndPaired()) return
-        val expectedGeneration = generation.get()
-        val waitMillis=maxOf(delayMs, reconnectNotBefore-SystemClock.elapsedRealtime()).coerceAtLeast(500L)
-        reconnectNotBefore=SystemClock.elapsedRealtime()+waitMillis
-        scheduler.schedule({
-            if (expectedGeneration == generation.get() && socket == null && isOptedInAndPaired()) ensureWebSocket()
-        }, waitMillis, TimeUnit.MILLISECONDS)
+        synchronized(webSocketLock){
+            if(authReconnectPending.get())return
+            val now=SystemClock.elapsedRealtime()
+            val due=maxOf(now+delayMs.coerceAtLeast(500L),retryAfterNotBefore)
+            // Periodic sync must not replace a pending failure retry; a real recovery may.
+            if(!recovery&&reconnectFuture!=null)return
+            reconnectFuture?.cancel(false)
+            val ticket=reconnectTicket.incrementAndGet()
+            reconnectNotBefore=due
+            val expectedGeneration=generation.get()
+            reconnectFuture=scheduler.schedule({
+                synchronized(webSocketLock){
+                    if(ticket!=reconnectTicket.get())return@schedule
+                    reconnectFuture=null;reconnectNotBefore=0L
+                }
+                if(expectedGeneration==generation.get()&&socket==null&&isOptedInAndPaired())ensureWebSocket()
+            },(due-now).coerceAtLeast(0L),TimeUnit.MILLISECONDS)
+        }
     }
 
     private fun registerConnectivityCallback() {
@@ -870,7 +892,7 @@ class HostBackgroundService : Service() {
                 service.forceNodeProbe.set(true)
                 service.closeWebSocket()
                 service.enqueueSync("network")
-                service.scheduleWebSocketReconnect(500L)
+                service.scheduleWebSocketReconnect(500L, recovery = true)
             }
         }
 
