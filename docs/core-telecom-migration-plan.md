@@ -1,6 +1,6 @@
 # Madoka Core-Telecom 迁移实现计划
 
-日期：2026-11-13。状态：待实施；本分支只编写计划，未修改运行代码。同日经审阅修订，变更摘要见第 9 节。
+日期：2026-11-13。状态：候选实现已完成本地构建与自动化，设备验证尚未执行；实施记录与验证交接见 [core-telecom-validation.md](core-telecom-validation.md)。同日经审阅修订，变更摘要见第 9 节。
 
 分支：`plan/core-telecom-migration`。代码基线：`27823c2610b19072b1f2cf1f8dc652d0b76a8732`。
 

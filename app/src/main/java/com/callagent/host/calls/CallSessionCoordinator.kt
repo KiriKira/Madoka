@@ -26,6 +26,7 @@ data class CallSession(
     val phase: CallPhase,
     val expiresAtEpochMillis: Long,
     val muted: Boolean = false,
+    val held: Boolean = false,
     val speaker: Boolean = false,
     val failure: String? = null,
     val endNotice: String? = null
@@ -125,6 +126,11 @@ class CallSessionCoordinator {
     fun connected(callId: String): Boolean = update(callId) { state ->
         if (state.phase !in setOf(CallPhase.ANSWERING, CallPhase.DIALING, CallPhase.OUTBOUND_RINGING)) null
         else state.copy(phase = CallPhase.ACTIVE)
+    }
+
+    @Synchronized
+    fun setHeld(callId: String, held: Boolean): Boolean = update(callId) { state ->
+        if (state.phase !in setOf(CallPhase.ACTIVE, CallPhase.ANSWERING, CallPhase.DIALING, CallPhase.OUTBOUND_RINGING, CallPhase.INCOMING_RINGING) || state.held == held) null else state.copy(held = held)
     }
 
     @Synchronized

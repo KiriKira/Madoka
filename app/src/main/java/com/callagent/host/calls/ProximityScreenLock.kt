@@ -13,7 +13,7 @@ internal object ProximityScreenLock {
 
     @Synchronized
     fun sync(context: Context, call: CallSession?) {
-        val wanted = call != null && wanted(call.phase,
+        val wanted = call != null && !call.held && wanted(call.phase,
             call.callId.let(CallTelecomController::currentAudioEndpoint), call.speaker)
         if (wanted) acquire(context.applicationContext) else release()
     }
@@ -25,9 +25,9 @@ internal object ProximityScreenLock {
         lock = null
     }
 
-    /** An unknown route is the earpiece unless the call asked for the speaker. */
+    /** Only a confirmed earpiece route may turn the screen off. */
     internal fun wanted(phase: CallPhase, endpoint: CallAudioEndpoint?, speaker: Boolean): Boolean =
-        phase in EAR_PHASES && (endpoint == CallAudioEndpoint.EARPIECE || (endpoint == null && !speaker))
+        phase in EAR_PHASES && endpoint == CallAudioEndpoint.EARPIECE && !speaker
 
     private fun acquire(context: Context) {
         if (lock?.isHeld == true) return

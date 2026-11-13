@@ -135,7 +135,7 @@ internal object CallNotificationManager {
             .build()
         val state = when (call.phase) {
             CallPhase.INCOMING_RINGING -> "来电"
-            CallPhase.ACTIVE -> "通话中"
+            CallPhase.ACTIVE -> if (call.held) "已保持" else "通话中"
             CallPhase.REGISTERING, CallPhase.DIALING, CallPhase.OUTBOUND_RINGING -> "正在呼叫"
             CallPhase.ANSWERING -> "正在接听"
             CallPhase.DISCONNECTING -> "正在结束通话"

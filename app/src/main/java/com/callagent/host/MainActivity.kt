@@ -2645,7 +2645,7 @@ class MainActivity : AppCompatActivity() {
         CallPhase.INCOMING_MATCHING -> "验证来电"
         CallPhase.INCOMING_RINGING -> "来电"
         CallPhase.ANSWERING -> "正在接听"
-        CallPhase.ACTIVE -> "通话中"
+        CallPhase.ACTIVE -> if (CallRuntime.currentSession?.held == true) "已保持" else "通话中"
         CallPhase.DISCONNECTING -> "正在挂断"
         CallPhase.ENDED -> "通话结束"
         CallPhase.FAILED -> "通话失败"

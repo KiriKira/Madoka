@@ -46,10 +46,19 @@ android {
         versionName = releaseVersionName
         // The phones this app targets are arm64. The pinned WebRTC SDK also ships
         // x86_64, which only emulators use.
-        ndk { abiFilters += "arm64-v8a" }
+        ndk {
+            val labAbi = providers.gradleProperty("rtcLabAbi").orElse("arm64-v8a").get()
+            require(labAbi in setOf("arm64-v8a", "x86_64")) { "Unsupported rtcLabAbi" }
+            require(labAbi == "arm64-v8a" || !releasePackagingRequested(gradle.startParameter.taskNames)) {
+                "rtcLabAbi=x86_64 is for debug emulator validation only"
+            }
+            abiFilters += labAbi
+        }
 
         testInstrumentationRunner = providers.gradleProperty("rtcLabRunner").orElse("androidx.test.runner.AndroidJUnitRunner").get()
         // Experimental timing changes stay opt-in until physical-device acceptance.
+        buildConfigField("boolean", "CORE_TELECOM", providers.gradleProperty("coreTelecom").orElse("true").get().toBoolean().toString())
+        manifestPlaceholders["legacyTelecomEnabled"] = providers.gradleProperty("coreTelecom").orElse("true").get().toBoolean().not().toString()
         buildConfigField("boolean", "STANDBY_EXPERIMENTS", providers.gradleProperty("standbyExperiments").orElse("false").get().toBoolean().toString())
         buildConfigField("long", "STANDBY_METADATA_MS", "${providers.gradleProperty("standbyMetadataMs").orElse("300000").get().toLong().coerceAtLeast(30000)}L")
         buildConfigField("long", "STANDBY_SMS_LIVE_MS", "${providers.gradleProperty("standbySmsLiveMs").orElse("120000").get().toLong().coerceAtLeast(30000)}L")
@@ -124,6 +133,8 @@ if (file("google-services.json").isFile) apply(plugin = "com.google.gms.google-s
 
 dependencies {
     implementation(project(":rtcmedia"))
+    implementation("androidx.core:core-telecom:1.0.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.google.firebase:firebase-messaging:26.0.1")
     implementation(files(rootProject.project(":rtcmedia").layout.buildDirectory.file("webrtc-sdk/external-playout.aar"))
         .builtBy(":rtcmedia:prepareWebRtcSdk"))

@@ -21,6 +21,9 @@ import com.callagent.host.data.HostSession
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29], shadows = [StartupTelecomShadow::class])
 class HostCallServiceStartupTest {
+    @org.junit.Before fun selectRollbackBackend() { CallTelecomController.coreForTests = false }
+    @org.junit.After fun resetBackend() { CallTelecomController.coreForTests = null }
+
     @Test fun differentNodeRetiresEngine() {
         StartupTelecomShadow.release = CountDownLatch(0)
         StartupTelecomShadow.returned = CountDownLatch(1)

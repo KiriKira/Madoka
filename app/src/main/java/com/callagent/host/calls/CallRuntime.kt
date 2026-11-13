@@ -197,14 +197,8 @@ object CallRuntime {
     fun answerFromVisibleUser(context: Context, callId: String): Boolean {
         com.callagent.host.data.HostRunLog.add("UI","answer tapped call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
-        val host = service ?: return false
-        if (!coordinator.answer(callId)) {
-            expireIncomingAnswerIfNeeded(host, callId)
-            return false
-        }
-        statusText = "正在建立加密语音…"
-        notifyChanged(callId)
-        host.answerAfterForeground(callId)
+        if (service == null || snapshot(callId)?.phase != CallPhase.INCOMING_RINGING) return false
+        CallTelecomController.answer(callId) { onTelecomAnswer(callId) }
         return true
     }
 
@@ -241,6 +235,7 @@ object CallRuntime {
         com.callagent.host.data.HostRunLog.add("UI","decline tapped call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
         val call = snapshot(callId) ?: return
         if (call.phase != CallPhase.INCOMING_RINGING) return
+        service?.setTelecomActive(callId, false)
         if (!coordinator.disconnect(callId)) return
         statusText = "正在拒接…"
         notifyChanged(callId)
@@ -254,6 +249,7 @@ object CallRuntime {
     private fun hangup(callId: String, context: Context) {
         val call = snapshot(callId) ?: return
         if (call.phase in setOf(CallPhase.ENDED, CallPhase.FAILED, CallPhase.DISCONNECTING)) return
+        service?.setTelecomActive(callId, false)
         if (!coordinator.disconnect(callId)) return
         statusText = "正在结束通话…"
         notifyChanged(callId)
@@ -276,24 +272,14 @@ object CallRuntime {
     fun selectedAudioEndpoint(callId: String): CallAudioEndpoint? = CallTelecomController.currentAudioEndpoint(callId)
 
     fun selectAudioEndpoint(context: Context, callId: String, endpoint: CallAudioEndpoint) {
-        if (CallTelecomController.selectAudioEndpoint(callId, endpoint)) return
-        // No Telecom connection to route through: switch the speaker directly,
-        // so the button never silently does nothing.
-        if (endpoint != CallAudioEndpoint.SPEAKER && endpoint != CallAudioEndpoint.EARPIECE) return
-        val audio = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-        val speaker = endpoint == CallAudioEndpoint.SPEAKER
-        runCatching {
-            if (android.os.Build.VERSION.SDK_INT >= 31) {
-                if (speaker) audio.availableCommunicationDevices
-                    .firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                    ?.let(audio::setCommunicationDevice)
-                else audio.clearCommunicationDevice()
-            } else {
-                @Suppress("DEPRECATION")
-                audio.isSpeakerphoneOn = speaker
-            }
+        if (!CallTelecomController.selectAudioEndpoint(callId, endpoint)) {
+            setStatus("所选音频设备当前不可用。", callId)
         }
-        onTelecomAudioRoute(callId, endpoint)
+    }
+
+    internal fun devices(callId: String) = CallTelecomController.devices(callId)
+    internal fun selectDevice(callId: String, id: String) {
+        if (!CallTelecomController.selectDevice(callId, id)) setStatus("所选音频设备已断开。", callId)
     }
 
     fun sendDtmf(context: Context, callId: String, digits: String) {
@@ -311,7 +297,23 @@ object CallRuntime {
         hangup(callId, host.applicationContext)
     }
 
-    internal fun onTelecomHold(callId: String, hold: Boolean) = Unit
+    internal fun onTelecomHold(callId: String, hold: Boolean) {
+        val call = snapshot(callId) ?: return
+        if (call.phase !in setOf(CallPhase.ACTIVE, CallPhase.ANSWERING, CallPhase.DIALING, CallPhase.OUTBOUND_RINGING, CallPhase.INCOMING_RINGING)) return
+        service?.setTelecomActive(callId, !hold)
+        coordinator.setHeld(callId, hold)
+        notifyChanged(callId)
+        appContext?.let { CallNotificationManager.showOngoing(it, snapshot(callId) ?: return@let) }
+    }
+
+    internal fun onTelecomActive(callId: String) {
+        service?.setTelecomActive(callId, true)
+        val resumed = coordinator.setHeld(callId, false)
+        notifyChanged(callId)
+        if (resumed) appContext?.let { CallNotificationManager.showOngoing(it, snapshot(callId) ?: return@let) }
+    }
+
+    fun resume(callId: String) = CallTelecomController.resume(callId)
 
     internal fun onTelecomAudioRoute(callId: String, endpoint: CallAudioEndpoint?) {
         coordinator.setSpeaker(callId, endpoint == CallAudioEndpoint.SPEAKER)
@@ -319,12 +321,16 @@ object CallRuntime {
     }
 
     internal fun onTelecomMute(callId: String, muted: Boolean) {
-        if (coordinator.setMuted(callId, muted)) service?.setMuted(callId, muted)
+        if (coordinator.setMuted(callId, muted)) {
+            service?.setMuted(callId, muted)
+            notifyChanged(callId)
+        }
     }
 
     internal fun onTelecomDtmf(callId: String, digit: Char) = service?.sendDtmf(callId, digit.toString())
 
     internal fun onTelecomConnectionCreated(callId: String) {
+        service?.onTelecomRegistered(callId)
         notifyChanged(callId)
     }
 
@@ -390,6 +396,8 @@ object CallRuntime {
     /** Whether a call service took the wake; false when none is running to poll. */
     internal fun requestCallSyncFromWakeHint(): Boolean =
         service?.requestCallSyncFromWakeHint() == true
+
+    internal fun owns(hostCallService: HostCallService): Boolean = service === hostCallService
 
     internal fun detach(hostCallService: HostCallService) {
         if (service === hostCallService) {

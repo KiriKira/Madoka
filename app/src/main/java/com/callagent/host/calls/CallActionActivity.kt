@@ -177,7 +177,23 @@ class CallActionActivity : AppCompatActivity() {
         } else if (requestCode == REQUEST_MICROPHONE) {
             android.widget.Toast.makeText(this, "接听电话需要麦克风权限", android.widget.Toast.LENGTH_LONG).show()
         }
+        if (requestCode == 7202) callId?.let { showAudioDevices(it, requestBluetooth = false) }
         render()
+    }
+
+    private fun showAudioDevices(id: String, requestBluetooth: Boolean = true) {
+        val devices = CallRuntime.devices(id)
+        if (requestBluetooth && android.os.Build.VERSION.SDK_INT >= 31 &&
+            devices.any { it.type == CallAudioEndpoint.BLUETOOTH } &&
+            checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 7202)
+            return
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("音频设备")
+            .setItems(devices.map { it.name }.toTypedArray()) { _, which ->
+                CallRuntime.selectDevice(id, devices[which].id)
+            }.setNegativeButton("取消", null).show()
     }
 
     private fun visibleCall(): CallSession? {
@@ -227,14 +243,23 @@ class CallActionActivity : AppCompatActivity() {
         if (contactName != null) root.addView(label(number, 16f).apply {
             setTextColor(color(com.google.android.material.R.attr.colorOnSurfaceVariant))
         })
-        root.addView(label(phaseLabel(call?.phase), 16f).apply {
+        root.addView(label(if (call?.held == true) "已保持" else phaseLabel(call?.phase), 16f).apply {
             setTextColor(color(androidx.appcompat.R.attr.colorPrimary))
             setPadding(0, dp(8), 0, dp(if (compact) 8 else 16))
         })
+        CallRuntime.currentStatus.takeIf { it.contains("系统未允许") || it.contains("音频设备") }?.let {
+            root.addView(label(it, 15f))
+        }
         call?.endNotice?.takeIf { it.isNotBlank() }?.let { root.addView(label(it, 15f)) }
         if (call?.phase == CallPhase.FAILED) root.addView(label("连接失败，请检查网络后重试", 15f))
-        if (call?.phase == CallPhase.ACTIVE && CallRuntime.currentStatus.let { it.contains("网络") || it.contains("恢复") }) {
+        if (call?.phase == CallPhase.ACTIVE && !call.held && CallRuntime.currentStatus.let { it.contains("网络") || it.contains("恢复") }) {
             root.addView(label("网络连接不稳定，正在恢复…", 15f))
+        }
+        if (call?.held == true && activeId != null) {
+            root.addView(MaterialButton(this).apply {
+                text = "恢复通话"
+                setOnClickListener { CallRuntime.resume(activeId) }
+            })
         }
         // Push the controls towards the bottom, where the thumb is.
         root.addView(android.view.View(this), LinearLayout.LayoutParams(1, 0, 1f))
@@ -275,11 +300,14 @@ class CallActionActivity : AppCompatActivity() {
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             controls.addView(roundControl("键盘", R.drawable.call_ui_keypad, keypadVisible) { keypadVisible = !keypadVisible; render() },
                 LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            // One tap toggles speaker and earpiece; a picker for two choices
-            // only added a step, and it could miss taps while the screen redrew.
-            val speakerOn = CallRuntime.selectedAudioEndpoint(activeId)?.let { it == CallAudioEndpoint.SPEAKER } ?: call.speaker
-            controls.addView(roundControl(if (speakerOn) "扬声器" else "听筒", R.drawable.call_ui_speaker, speakerOn) {
-                CallRuntime.toggleSpeaker(this, activeId, !speakerOn)
+            val device = CallTelecomController.currentDevice(activeId)
+            val external = CallRuntime.devices(activeId).any {
+                it.type == CallAudioEndpoint.BLUETOOTH || it.type == CallAudioEndpoint.WIRED_HEADSET
+            }
+            val speakerOn = device?.type == CallAudioEndpoint.SPEAKER
+            controls.addView(roundControl(device?.name ?: "音频", R.drawable.call_ui_speaker, speakerOn) {
+                if (external) showAudioDevices(activeId)
+                else CallRuntime.toggleSpeaker(this, activeId, !speakerOn)
             }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             root.addView(controls, LinearLayout.LayoutParams(dp(360).coerceAtMost(resources.displayMetrics.widthPixels - dp(40)), ViewGroup.LayoutParams.WRAP_CONTENT))
         }

@@ -44,6 +44,7 @@ interface CallEngine : AutoCloseable {
     fun sendDtmf(callId: String, digits: String)
     fun setMute(callId: String, muted: Boolean)
     fun enableAudio(callId: String)
+    fun setTelecomActive(callId: String, active: Boolean) {}
     fun suspendAudio(callId: String)
     fun refreshNetwork()
     /** The server's wake channel says this device has a call event: look now. */

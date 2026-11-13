@@ -95,6 +95,21 @@ class CallSessionCoordinatorTest {
         assertEquals(CallPhase.ACTIVE, coordinator.current?.phase)
     }
 
+    @Test fun holdDoesNotChangeServerPhaseOrUserMuteAndTerminalCannotResume() {
+        val coordinator = CallSessionCoordinator()
+        assertTrue(coordinator.incomingInvite(invite(), authority(), now))
+        assertTrue(coordinator.answer("call-1", now))
+        assertTrue(coordinator.setHeld("call-1", true))
+        assertTrue(coordinator.connected("call-1"))
+        assertTrue(coordinator.current!!.held)
+        assertTrue(coordinator.setMuted("call-1", true))
+        assertTrue(coordinator.setHeld("call-1", false))
+        assertTrue(coordinator.current!!.muted)
+        assertEquals(CallPhase.ACTIVE, coordinator.current!!.phase)
+        assertTrue(coordinator.ended("call-1"))
+        assertFalse(coordinator.setHeld("call-1", false))
+    }
+
     private fun authority() = CallAuthority(
         callId = "call-1",
         direction = "incoming",

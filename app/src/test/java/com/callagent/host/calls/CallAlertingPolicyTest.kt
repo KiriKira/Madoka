@@ -26,7 +26,7 @@ class CallAlertingPolicyTest {
     @Test
     fun theScreenTurnsOffAtTheEarOnlyWhileAudioIsOnTheEarpiece() {
         assertTrue(ProximityScreenLock.wanted(CallPhase.ACTIVE, CallAudioEndpoint.EARPIECE, speaker = false))
-        assertTrue(ProximityScreenLock.wanted(CallPhase.DIALING, null, speaker = false))
+        assertFalse(ProximityScreenLock.wanted(CallPhase.DIALING, null, speaker = false))
         assertFalse(ProximityScreenLock.wanted(CallPhase.ACTIVE, CallAudioEndpoint.SPEAKER, speaker = true))
         assertFalse(ProximityScreenLock.wanted(CallPhase.ACTIVE, CallAudioEndpoint.BLUETOOTH, speaker = false))
         assertFalse(ProximityScreenLock.wanted(CallPhase.ACTIVE, null, speaker = true))

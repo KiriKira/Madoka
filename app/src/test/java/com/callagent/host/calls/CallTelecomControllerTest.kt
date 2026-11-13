@@ -21,7 +21,7 @@ class CallTelecomControllerTest {
         shadowTelecom.setCallPhonePermission(true)
         val details = TelecomCallDetails("test-outgoing-call", CallDirection.OUTGOING, "123", "Remote SIM")
 
-        CallTelecomController.placeOutgoing(app, details)
+        LegacyCallTelecomController.placeOutgoing(app, details)
 
         val outgoing = shadowTelecom.onlyOutgoingCall
         assertEquals("gsm2sip", outgoing.address.scheme)
@@ -33,10 +33,10 @@ class CallTelecomControllerTest {
         // custom keys placed directly alongside EXTRA_PHONE_ACCOUNT_HANDLE.
         val forwarded = outgoing.extras.getBundle(TelecomManager.EXTRA_OUTGOING_CALL_EXTRAS)
         assertNotNull("Telecom must receive the call metadata Bundle", forwarded)
-        assertEquals(details.callId, forwarded!!.getString(CallTelecomController.EXTRA_CALL_ID))
-        assertEquals(CallDirection.OUTGOING.name, forwarded.getString(CallTelecomController.EXTRA_DIRECTION))
-        assertEquals(details.remoteNumber, forwarded.getString(CallTelecomController.EXTRA_NUMBER))
-        assertEquals(details.simLabel, forwarded.getString(CallTelecomController.EXTRA_SIM_LABEL))
+        assertEquals(details.callId, forwarded!!.getString(LegacyCallTelecomController.EXTRA_CALL_ID))
+        assertEquals(CallDirection.OUTGOING.name, forwarded.getString(LegacyCallTelecomController.EXTRA_DIRECTION))
+        assertEquals(details.remoteNumber, forwarded.getString(LegacyCallTelecomController.EXTRA_NUMBER))
+        assertEquals(details.simLabel, forwarded.getString(LegacyCallTelecomController.EXTRA_SIM_LABEL))
     }
 
     private fun ringing(callId: String): HostCallConnection {

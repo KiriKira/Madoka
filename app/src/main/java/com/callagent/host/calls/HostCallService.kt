@@ -54,7 +54,7 @@ class HostCallService : android.app.Service() {
     @Volatile private var networkMonitorGeneration = 0L
     private var currentDefaultNetwork: Network? = null
     private val callbackDefaultNetwork = AtomicReference<Network?>(null)
-    private var networkUnavailable = false
+    @Volatile private var networkUnavailable = false
     private var controlRetryPending = false
     private val networkRecoveryPolicy = NetworkRecoveryPolicy()
     private var networkLossWindow: NetworkRecoveryPolicy.LossWindow? = null
@@ -66,7 +66,8 @@ class HostCallService : android.app.Service() {
     private var pendingGatewayId: String? = null
     private var pendingSimId: String? = null
     private val dialStartedForCall = mutableSetOf<String>()
-    private val inboundEngineIds = mutableMapOf<String, String>()
+    private val localEndCauses = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val inboundEngineIds = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val inboundExpiryCallbacks = ConcurrentHashMap<String, Runnable>()
     private var pendingAnswerCallId: String? = null
 
@@ -134,6 +135,15 @@ class HostCallService : android.app.Service() {
         inboundExpiryCallbacks.clear()
         stopSignalingForeground()
         CallSignalingNotification.cancel(this)
+        CallRuntime.currentCallId?.takeIf { CallRuntime.owns(this) }?.let { id ->
+            CallRuntime.coordinator.failed(id, "Call service stopped")
+            CallTelecomController.disconnect(id, android.telecom.DisconnectCause.LOCAL) {
+                if (CallRuntime.currentCallId == id) {
+                    CallForegroundService.stop(this)
+                    CallNotificationManager.cancel(this)
+                }
+            }
+        }
         CallRuntime.detach(this)
         // Keep engine teardown ordered after any call operation already on the serial worker.
         runCatching { io.execute { closeEngine() } }
@@ -320,7 +330,10 @@ class HostCallService : android.app.Service() {
                 executeOnIo {
                     if (CallRuntime.snapshot(callId)?.phase != CallPhase.ACTIVE) return@executeOnIo
                     val engineCallId = inboundEngineIds[callId] ?: callId
-                    runCatching { requireCallEngine().enableAudio(engineCallId) }
+                    runCatching {
+                        if (networkUnavailable || controlRetryPending) requireCallEngine().suspendAudio(engineCallId)
+                        else requireCallEngine().enableAudio(engineCallId)
+                    }
                         .onFailure { failCall(callId, "Android could not enable call audio") }
                 }
             }
@@ -343,6 +356,7 @@ class HostCallService : android.app.Service() {
     /** Without [message] this is the user's own decline (the button, the
      * notification or Telecom), which may end the call on every phone. */
     internal fun rejectCall(callId: String, message: String? = null) {
+        localEndCauses[callId] = if (message == null) android.telecom.DisconnectCause.REJECTED else android.telecom.DisconnectCause.LOCAL
         executeOnIo {
             val engineKey = inboundEngineIds[callId]
             val byUser = message == null
@@ -406,6 +420,7 @@ class HostCallService : android.app.Service() {
     }
 
     internal fun hangupCall(callId: String) {
+        localEndCauses[callId] = android.telecom.DisconnectCause.LOCAL
         executeOnIo {
             val engineKey = inboundEngineIds[callId] ?: callId
             runCatching { callEngine?.hangup(engineKey) }
@@ -415,6 +430,14 @@ class HostCallService : android.app.Service() {
             }
             finishCall(callId, failed = false)
         }
+    }
+
+    internal fun setTelecomActive(callId: String, active: Boolean) {
+        // Do not queue behind HTTP: Telecom must receive completed local audio suspension.
+        val call = CallRuntime.snapshot(callId) ?: return
+        if (call.phase in setOf(CallPhase.ENDED, CallPhase.FAILED, CallPhase.DISCONNECTING)) return
+        callEngine?.setTelecomActive(inboundEngineIds[callId] ?: callId, active)
+        if (!active) ringback.stop(callId)
     }
 
     internal fun setMuted(callId: String, muted: Boolean) {
@@ -510,8 +533,13 @@ class HostCallService : android.app.Service() {
         }
     }
 
+    internal fun onTelecomRegistered(callId: String) {
+        executeOnIo { if (pendingOutboundCallId == callId) startAuthorizedOutbound() }
+    }
+
     private fun startAuthorizedOutbound() {
         val callId = pendingOutboundCallId ?: return
+        if (!CallTelecomController.isRegistered(callId)) return
         if (callId in dialStartedForCall) return
         if (System.currentTimeMillis() >= pendingOutboundExpiry) {
             pendingCallIntentId?.let { id -> runCatching { cancelAuthorization(apiForCurrentSession(), id) } }
@@ -606,7 +634,7 @@ class HostCallService : android.app.Service() {
                 // restarting the ringback then left it playing forever.
                 if (current.direction == CallDirection.OUTGOING && current.phase.isInProgress() &&
                     current.phase != CallPhase.DISCONNECTING) {
-                    ringback.start(serverCallId)
+                    if (CallRuntime.snapshot(serverCallId)?.held != true) ringback.start(serverCallId)
                     CallRuntime.coordinator.outboundRinging(serverCallId)
                     CallRuntime.setStatus("等待远程 SIM 接听…", serverCallId)
                     CallNotificationManager.showConnecting(this, CallRuntime.snapshot(serverCallId) ?: return)
@@ -735,7 +763,7 @@ class HostCallService : android.app.Service() {
                 val engineCallId = inboundEngineIds[call.callId]
                 Log.i(TAG, "Incoming call was not answered in time"); com.callagent.host.data.HostRunLog.add("CALL", "Incoming call was not answered in time")
                 if (engineCallId != null) runCatching { callEngine?.reject(engineCallId, CallRejection.EXPIRED) }
-                finishCall(call.callId, failed = false, statusText = "来电已超时。")
+                finishCall(call.callId, failed = false, statusText = "来电已超时。", disconnectCause = android.telecom.DisconnectCause.MISSED)
             }
         }
         inboundExpiryCallbacks[call.callId] = timeout
@@ -757,7 +785,8 @@ class HostCallService : android.app.Service() {
         failed: Boolean,
         failureReason: String = "Call ended",
         endNotice: String? = null,
-        statusText: String? = null
+        statusText: String? = null,
+        disconnectCause: Int? = null
     ) {
         ringback.stop(callId)
         val current = CallRuntime.snapshot(callId) ?: return
@@ -771,10 +800,17 @@ class HostCallService : android.app.Service() {
         else CallRuntime.coordinator.ended(callId, endNotice)
         CallTelecomController.disconnect(
             callId,
-            if (failed) android.telecom.DisconnectCause.ERROR else android.telecom.DisconnectCause.REMOTE
-        )
-        CallNotificationManager.cancel(this)
-        CallForegroundService.stop(this)
+            disconnectCause ?: localEndCauses.remove(callId) ?: if (failed) android.telecom.DisconnectCause.LOCAL
+            else android.telecom.DisconnectCause.REMOTE
+        ) {
+            mainHandler.post {
+                if (CallRuntime.currentSession?.callId == callId || CallRuntime.currentSession == null) {
+                    CallNotificationManager.cancel(this)
+                    CallForegroundService.stop(this)
+                    if (!listeningRequested && !foregroundListening) stopSelf()
+                }
+            }
+        }
         inboundExpiryCallbacks.remove(callId)?.let(mainHandler::removeCallbacks)
         inboundEngineIds.remove(callId)
         if (pendingOutboundCallId == callId) {
@@ -798,7 +834,7 @@ class HostCallService : android.app.Service() {
             }
         } else {
             closeEngine()
-            stopSelf()
+            // Platform disconnect completion owns stopSelf, not engine teardown.
         }
     }
 

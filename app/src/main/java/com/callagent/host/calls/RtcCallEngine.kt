@@ -79,7 +79,8 @@ internal class RtcCallEngine(
     private val snapshots = ConcurrentHashMap<String,JSONObject>()
     private val delivered = ConcurrentHashMap<String,EngineCallState>()
     private val terminalSeenAt = ConcurrentHashMap<String, Long>()
-    private val audioAllowed = ConcurrentHashMap.newKeySet<String>()
+    private val audioPermits = ConcurrentHashMap<String, CallAudioPermit>()
+    private val audioPermitLock = Any()
     @Volatile private var lastControl = System.nanoTime()
     private var lastCapability = 0L
     @Volatile private var ready = false
@@ -221,7 +222,7 @@ internal class RtcCallEngine(
             // Terminal IDs still returned by the server remain fenced; older
             // IDs need no full snapshots or native resources in this engine.
             val retired = delivered.filter { (id, state) -> state in TERMINAL && id !in present }.keys
-            retired.forEach { snapshots.remove(it); audioAllowed.remove(it) }
+            retired.forEach { snapshots.remove(it); synchronized(audioPermitLock) { audioPermits.remove(it) } }
             val nowMs = android.os.SystemClock.elapsedRealtime()
             terminalSeenAt.filterValues { nowMs - it >= 3_600_000L }.keys.forEach { id ->
                 synchronized(lifecycle) {
@@ -295,7 +296,7 @@ internal class RtcCallEngine(
             delivered[id] = state
             if (state in TERMINAL) {
                 terminalSeenAt.putIfAbsent(id, android.os.SystemClock.elapsedRealtime())
-                audioAllowed.remove(id)
+                synchronized(audioPermitLock) { audioPermits[id]?.end() }
                 media.remove(id)
             } else null
         }
@@ -325,7 +326,7 @@ internal class RtcCallEngine(
             // Another session already owns this leg; never signal its close.
             if (media.putIfAbsent(id,rtc) != null) { rtc.discard(); error("Media already exists") }
             try {
-                rtc.enableAudio(id in audioAllowed)
+                synchronized(audioPermitLock) { rtc.enableAudio(audioPermits[id]?.allowed == true) }
                 rtc.start()
             } catch (error: Throwable) {
                 media.remove(id, rtc)
@@ -361,7 +362,7 @@ internal class RtcCallEngine(
             if (closed.get() || delivered[id] in TERMINAL) return
             delivered[id] = EngineCallState.FAILED
             terminalSeenAt.putIfAbsent(id, android.os.SystemClock.elapsedRealtime())
-            audioAllowed.remove(id)
+            synchronized(audioPermitLock) { audioPermits[id]?.end() }
             media.remove(id)
         }
         retired?.close()
@@ -420,7 +421,7 @@ internal class RtcCallEngine(
             if (closed.get() || delivered[id] in TERMINAL) return
             delivered[id] = EngineCallState.DISCONNECTED
             terminalSeenAt.putIfAbsent(id, android.os.SystemClock.elapsedRealtime())
-            audioAllowed.remove(id)
+            synchronized(audioPermitLock) { audioPermits[id]?.end() }
             media.remove(id)
         }
         retired?.close()
@@ -435,8 +436,25 @@ internal class RtcCallEngine(
     }
     override fun sendDtmf(callId:String,digits:String)=checkNotNull(media[callId]).sendDtmf(digits)
     override fun setMute(callId:String,muted:Boolean)=checkNotNull(media[callId]).mute(muted)
-    override fun enableAudio(callId:String){audioAllowed.add(callId);media[callId]?.enableAudio(true)}
-    override fun suspendAudio(callId:String){audioAllowed.remove(callId);media[callId]?.enableAudio(false)}
+    override fun enableAudio(callId:String) = synchronized(audioPermitLock) {
+        if (closed.get() || delivered[callId] in TERMINAL) return@synchronized
+        val permit = audioPermits.getOrPut(callId) { CallAudioPermit() }
+        permit.authorize(true)
+        media[callId]?.enableAudio(permit.allowed)
+        Unit
+    }
+    override fun suspendAudio(callId:String) = synchronized(audioPermitLock) {
+        audioPermits[callId]?.authorize(false)
+        media[callId]?.enableAudio(false)
+        Unit
+    }
+    override fun setTelecomActive(callId:String, active:Boolean) = synchronized(audioPermitLock) {
+        if (closed.get() || delivered[callId] in TERMINAL) return@synchronized
+        val permit = audioPermits.getOrPut(callId) { CallAudioPermit() }
+        permit.activate(active)
+        media[callId]?.enableAudio(permit.allowed)
+        Unit
+    }
     override fun refreshNetwork()=wake()
     internal companion object {
         internal fun liveInvitation(snapshot: JSONObject): Boolean {
@@ -503,7 +521,7 @@ internal class RtcCallEngine(
         if (networkRegistered) runCatching { connectivity.unregisterNetworkCallback(networkCallback) }
         worker.shutdownNow()
         val retired = synchronized(lifecycle) {
-            media.values.toList().also { media.clear(); snapshots.clear(); delivered.clear(); terminalSeenAt.clear(); audioAllowed.clear() }
+            media.values.toList().also { media.clear(); snapshots.clear(); delivered.clear(); terminalSeenAt.clear(); synchronized(audioPermitLock) { audioPermits.values.forEach { it.end() }; audioPermits.clear() } }
         }
         retired.forEach { it.close() }
     }
