@@ -47,6 +47,29 @@ class RtcAudioSessionPreparationTest {
         assertEquals(emptyList<String>(), requests.toList())
     }
 
+    // Regression cases authored for CI; not compiled or run in the repair workspace.
+    @Test fun closingAnUnusedSessionDoesNotSignalOnTheSharedLeg() {
+        val session = session {}
+        session.close()
+        assertTrue(session.awaitShutdown(5000))
+        assertTrue(session.isClosed)
+        assertEquals(emptyList<String>(), requests.toList())
+    }
+
+    @Test fun preparationFailureCallbackMayCloseWithoutSignalingOnTheSharedLeg() {
+        val failed = CountDownLatch(1)
+        lateinit var session: RtcAudioSession
+        session = session {
+            session.close()
+            failed.countDown()
+        }
+        session.prepare()
+        assertTrue("preparation without the native library must fail", failed.await(5, TimeUnit.SECONDS))
+        assertTrue(session.awaitShutdown(5000))
+        assertTrue(session.isClosed)
+        assertEquals(emptyList<String>(), requests.toList())
+    }
+
     private fun waitClosed(session: RtcAudioSession): Boolean {
         val until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
         while (System.nanoTime() < until) { if (session.isClosed) return true; Thread.sleep(20) }

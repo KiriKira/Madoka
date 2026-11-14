@@ -53,6 +53,7 @@ class RtcAudioSession(
     }
     private val nodeRelayPolicy=RelayRepository.nodePolicy(context,currentRelayNodeId)
     private val relaySelection=RelaySources.selectForCall(if(nodeRelayPolicy.first)nodeServers else emptyList(),additionalRelaySources,RelayRepository.cachedRank(context,nodeServers),nodeRelayPolicy.second).let(TurnCredentials::resolve)
+    private val relayDiagnostics=RelayGatheringDiagnostics(nodeServers,nodeRelayPolicy.first,additionalRelaySources,relaySelection)
     private val servers = relaySelection.servers.map { item ->
         PeerConnection.IceServer.builder(item.urls).apply {
             item.username?.let(::setUsername)
@@ -60,14 +61,14 @@ class RtcAudioSession(
         }.createIceServer()
     }
     private val worker=Executors.newSingleThreadScheduledExecutor { task -> Thread(task,"RTC-Signal-${callId.take(8)}") }
-    private val closed=AtomicBoolean()
+    private val peerSlot=CloseableSlot<NativePeer>()
     private val started=AtomicBoolean()
     private val failed=AtomicBoolean()
     private val connectionLatch=CountDownLatch(1)
-    @Volatile private var peer:NativePeer?=null
+    private val peer:NativePeer? get()=peerSlot.get()
     @Volatile var isConnected=false;private set
     @Volatile var cellularActive=false;private set
-    val isClosed: Boolean get() = closed.get()
+    val isClosed: Boolean get() = peerSlot.isClosed
     private var descriptionApplied=false
     private var readyReported=false
     private var revision=1L
@@ -111,9 +112,14 @@ class RtcAudioSession(
         relaySelection.fallbackReason?.let{event("relay_sources_fallback reason=$it")}
         worker.execute {
             try {
-                if(closed.get())return@execute
-                val native=NativePeer(context,callId,servers,pcm,::event,onDigit,{ reason -> runCatching { worker.execute { fail(reason) } }; Unit },forceRelay,relaySelection::sourcesForUrl,relaySelection.hasAdditionalSources)
-                if(closed.get()){native.close();return@execute};peer=native
+                if(peerSlot.isClosed)return@execute
+                val native=NativePeer(context,callId,servers,pcm,::event,onDigit,
+                    { reason -> runCatching { worker.execute { fail(reason) } }; Unit },
+                    forceRelay,relaySelection::sourcesForUrl,relaySelection.hasAdditionalSources,
+                    onGatheringComplete={ count ->
+                        if(!peerSlot.isClosed)relayDiagnostics.completed(forceRelay,count)?.let(::event)
+                    })
+                if(!peerSlot.install(native))return@execute
                 native.mute(desiredMute);native.enableAudio(desiredAudio)
                 event("native_ready elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-preparedAt)}")
                 if(!gateway){
@@ -130,7 +136,7 @@ class RtcAudioSession(
         prepare()
         worker.execute {
             try {
-                if(closed.get() || failed.get())return@execute
+                if(peerSlot.isClosed || failed.get())return@execute
                 checkNotNull(peer)
                 startedAt=System.nanoTime()
                 if(!gateway){
@@ -139,12 +145,12 @@ class RtcAudioSession(
                     pendingOffer=null
                     event("offer_sent prepared_ms=${TimeUnit.NANOSECONDS.toMillis(startedAt-preparedAt)}")
                 }
-                if(!closed.get())worker.scheduleWithFixedDelay(::poll,0,250,TimeUnit.MILLISECONDS)
+                if(!peerSlot.isClosed)worker.scheduleWithFixedDelay(::poll,0,250,TimeUnit.MILLISECONDS)
             }catch(_:Throwable){fail("native_or_offer_setup_failed")}
         }
     }
     private fun poll() {
-        if(closed.get())return
+        if(peerSlot.isClosed)return
         val now=System.nanoTime()
         // A host's call is up only once the gateway reports cellular audio,
         // so keep polling briskly until then.
@@ -255,13 +261,13 @@ class RtcAudioSession(
             }
         }
     }
-    fun awaitConnected(timeoutMillis:Long):Boolean = connectionLatch.await(timeoutMillis,TimeUnit.MILLISECONDS) && peer?.isConnected==true && !closed.get()
-    fun enableAudio(enabled:Boolean){desiredAudio=enabled;if(!closed.get())peer?.enableAudio(enabled)}
-    fun mute(muted:Boolean){desiredMute=muted;if(!closed.get())peer?.mute(muted)}
-    fun sendDtmf(digits:String){check(!closed.get());checkNotNull(peer).sendDtmf(digits)}
+    fun awaitConnected(timeoutMillis:Long):Boolean = connectionLatch.await(timeoutMillis,TimeUnit.MILLISECONDS) && peer?.isConnected==true && !peerSlot.isClosed
+    fun enableAudio(enabled:Boolean){desiredAudio=enabled;if(!peerSlot.isClosed)peer?.enableAudio(enabled)}
+    fun mute(muted:Boolean){desiredMute=muted;if(!peerSlot.isClosed)peer?.mute(muted)}
+    fun sendDtmf(digits:String){check(!peerSlot.isClosed);checkNotNull(peer).sendDtmf(digits)}
     fun markCellularActive(){
         worker.execute {
-            if(closed.get())return@execute
+            if(peerSlot.isClosed)return@execute
             try {api.request("POST","/calls/$callId/media/active",JSONObject().put("leg_id",legId));cellularActive=true;event("cellular_active")}
             catch(_:Throwable){fail("cellular_authority_update_failed")}
         }
@@ -272,23 +278,24 @@ class RtcAudioSession(
         Log.i("GsmRtc",line);onLog(line)
     }
     private fun fail(reason:String){
-        if(closed.get() || !failed.compareAndSet(false,true))return
-        event("failed reason=$reason");connectionLatch.countDown()
-        // Fail closed even if the app callback itself throws.
+        if(peerSlot.isClosed || !failed.compareAndSet(false,true))return
+        connectionLatch.countDown()
+        // Fail closed even if a logging or app callback itself throws.
         // Nothing was signaled before start, so a failed preparation leaves
         // the leg for a fresh session to use.
-        try{onFailure(reason)}finally{close(notifyPeer = started.get())}
+        try{event("failed reason=$reason");onFailure(reason)}finally{close(notifyPeer = started.get())}
     }
     fun awaitShutdown(timeoutMillis:Long):Boolean = worker.awaitTermination(timeoutMillis,TimeUnit.MILLISECONDS)
-    override fun close() = close(notifyPeer = true)
+    // A ringing preparation has not signaled and must not close the shared leg.
+    override fun close() = close(notifyPeer = started.get())
 
     /** Drops local media without signaling: for a preparation that was never
      * started, whose leg another session or the call's end owns. */
     fun discard() = close(notifyPeer = false)
 
     private fun close(notifyPeer:Boolean){
-        if(!closed.compareAndSet(false,true))return
-        connectionLatch.countDown();peer?.close();peer=null;RelayStatus.clear(callId)
+        if(!peerSlot.close())return
+        connectionLatch.countDown();RelayStatus.clear(callId)
         unusedExpiry?.cancel(false)
         if(notifyPeer)runCatching{worker.execute {runCatching{send("close")}}}
         worker.shutdown()
