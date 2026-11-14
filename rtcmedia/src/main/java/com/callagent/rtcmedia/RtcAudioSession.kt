@@ -52,7 +52,7 @@ class RtcAudioSession(
         }
     }
     private val nodeRelayPolicy=RelayRepository.nodePolicy(context,currentRelayNodeId)
-    private val relaySelection=RelaySources.selectForCall(if(nodeRelayPolicy.first)nodeServers else emptyList(),additionalRelaySources,RelayRepository.cachedRank(context,nodeServers),nodeRelayPolicy.second).let(TurnCredentials::resolve)
+    private val relaySelection=RelaySources.selectForCall(if(nodeRelayPolicy.first)nodeServers else emptyList(),additionalRelaySources,RelayRepository.cachedRank(context,nodeServers),nodeRelayPolicy.second).let{TurnCredentials.resolve(it,onEvent=::event)}
     private val relayDiagnostics=RelayGatheringDiagnostics(nodeServers,nodeRelayPolicy.first,additionalRelaySources,relaySelection)
     private val servers = relaySelection.servers.map { item ->
         PeerConnection.IceServer.builder(item.urls).apply {
