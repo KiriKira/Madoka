@@ -323,7 +323,7 @@ internal class RtcCallEngine(
         val admission=RtcAudioSession.select(api,id)
         configureRelayNodes()
         check(admission.getString("call_control")=="rtc"){"Server call control required"}
-        return RtcAudioSession(context,admission,api,false,pcmForCall?.invoke(id),additionalRelaySources=RelayRepository.resolve(context,admission.getJSONObject("binding").getString("owner_id"),currentNodeId=relayNodeId,nodeServers=RelayRepository.servers(admission.getJSONArray("ice_servers"))),forceRelay=com.callagent.host.BuildConfig.FORCE_RTC_RELAY,currentRelayNodeId=relayNodeId,onReady={report(id)},
+        return RtcAudioSession(context,admission,api,false,pcmForCall?.invoke(id),additionalRelaySources=RelayRepository.resolveForCall(context,admission.getJSONObject("binding").getString("owner_id"),id,currentNodeId=relayNodeId,nodeServers=RelayRepository.servers(admission.getJSONArray("ice_servers"))),forceRelay=com.callagent.host.BuildConfig.FORCE_RTC_RELAY,currentRelayNodeId=relayNodeId,onReady={report(id)},
             onLog={line->com.callagent.host.data.HostRunLog.add("MEDIA",line.substringAfter("call_id=").let{"call=${it.take(8)} ${line.substringAfter(" event=","")}"})},
             onFailure={reason->handleMediaFailure(id,reason)})
     }
