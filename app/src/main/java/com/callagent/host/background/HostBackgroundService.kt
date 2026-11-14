@@ -1,0 +1,938 @@
+package com.callagent.host.background
+
+import android.app.Notification
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Build
+import android.os.IBinder
+import android.os.PowerManager
+import android.os.SystemClock
+import com.callagent.host.MainActivity
+import com.callagent.host.R
+import com.callagent.host.data.ClientDatabase
+import com.callagent.host.data.HostSession
+import com.callagent.host.data.HostSyncEngine
+import com.callagent.host.data.SessionNeedsPairing
+import com.callagent.host.data.SessionStore
+import com.callagent.host.data.SessionChanged
+import com.callagent.host.data.SyncBudgetExhausted
+import com.callagent.host.data.databaseName
+import com.callagent.host.data.sameProfile
+import com.callagent.host.data.sameSessionInstance
+import com.callagent.host.calls.CallRuntime
+import com.callagent.host.calls.SimLabels
+import com.callagent.host.notify.HostNotificationChannels
+import com.callagent.host.notify.InboundSmsNotifications
+import com.callagent.host.mesh.NodeMonitor
+import com.callagent.host.push.PushRegistration
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.random.Random
+
+class HostBackgroundService : Service() {
+    private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private val generation = AtomicLong(1L)
+    private val syncRequests = CoalescedSyncRequests()
+    private val periodicStarted = AtomicBoolean(false)
+    private val authReconnectPending = AtomicBoolean(false)
+    private val forceNodeProbe = AtomicBoolean(false)
+    private val webSocketLock = Any()
+    private val socketGeneration = AtomicLong(0L)
+    private lateinit var sessionStore: SessionStore
+    private lateinit var connectivityManager: ConnectivityManager
+    private lateinit var notificationManager: NotificationManager
+    private val notificationCoalescers = mutableMapOf<String, InboundNotificationCoalescer>()
+    private val wsClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(if (com.callagent.host.BuildConfig.STANDBY_SERVER_PING_ONLY) 0 else 25, TimeUnit.SECONDS)
+            .build()
+    }
+    @Volatile private var socket: WebSocket? = null
+    @Volatile private var socketLive = false
+    /** The default network the current socket was opened on. */
+    @Volatile private var socketNetwork: Network? = null
+    @Volatile private var syncFailures = 0
+    @Volatile private var activeSession: HostSession? = null
+    private val reconnectAttempt = java.util.concurrent.atomic.AtomicInteger(0)
+    /** When the current socket opened, on the elapsed-realtime clock. */
+    @Volatile private var socketOpenedAt = 0L
+    @Volatile private var callbackRegistered = false
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            syncFailures = 0
+            setConnection("Connecting to server")
+            // A new network (home Wi-Fi, mobile data) can change which node is best.
+            forceNodeProbe.set(true)
+            enqueueSync("network")
+            // A socket opened on the old network is dead even if nothing says so
+            // yet; the node's next ping can be minutes away. Switches come in
+            // bursts (Wi-Fi, then VPN), so reconnect once they settle.
+            if (socket != null && socketNetwork != null && socketNetwork != network) closeWebSocket()
+            scheduleWebSocketReconnect(NETWORK_SETTLE_MS, recovery = true)
+        }
+
+        override fun onLost(network: Network) {
+            if (!com.callagent.host.network.NetworkEnvironment.online(this@HostBackgroundService)) setConnection("Waiting for network")
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        synchronized(HostBackgroundService::class.java) {
+            liveService = this
+            isRunning = true
+        }
+        sessionStore = SessionStore(applicationContext)
+        connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        createNotificationChannels()
+        registerConnectivityCallback()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_STOP) {
+            return if (stopFromUser()) START_NOT_STICKY else START_STICKY
+        }
+
+        val prefs = RuntimeState.preferences(this)
+        val session = runCatching { sessionStore.read() }.getOrNull()
+        if (intent == null && !HostBackgroundRuntime.restoreAllowed(this)) {
+            HostBackgroundRuntime.onServiceStartRejected(session)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        if (!HostBackgroundPolicy.shouldRestore(
+                prefs.getBoolean(RuntimeState.KEY_ENABLED, HostBackgroundPolicy.DEFAULT_ENABLED),
+                session?.role == "client"
+        ) || !isBoundToOptIn(session)
+        ) {
+            HostBackgroundRuntime.onServiceStartRejected(session)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
+        try {
+            startForegroundCompat()
+        } catch (_: RuntimeException) {
+            prefs.edit().putBoolean(RuntimeState.KEY_ENABLED, false).commit()
+            HostBackgroundRuntime.onServiceStartRejected(session)
+            RuntimeState.update(this, connection = "Stopped", issue = "Android could not display the required background notification. Enable notifications and start background sync again.")
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
+        val previousSession = activeSession
+        if (previousSession != null && !previousSession.sameSessionInstance(session!!)) {
+            generation.incrementAndGet()
+            closeWebSocket()
+            // Another node of the same profile keeps the pending SMS alerts.
+            if (!previousSession.sameProfile(session)) cancelPendingNotifications(previousSession)
+        }
+        activeSession = session
+        HostBackgroundRuntime.onServiceStarted(session!!)
+        RuntimeState.update(this, connection = "Connecting", issue = null)
+        ensureWebSocket()
+        enqueueSync()
+        if (periodicStarted.compareAndSet(false, true)) {
+            schedulePeriodicSync()
+        }
+        return START_STICKY
+    }
+
+    private fun schedulePeriodicSync() {
+        if (scheduler.isShutdown) return
+        val pushCovered = pushCovers(runCatching { sessionStore.read() }.getOrNull())
+        val delay = HostBackgroundPolicy.syncDelay(socketLive, syncFailures,
+            com.callagent.host.BuildConfig.STANDBY_EXPERIMENTS, com.callagent.host.network.NetworkEnvironment.stable, pushCovered)
+        scheduler.schedule({
+            try {
+                if (isOptedInAndPaired()) {
+                    if (com.callagent.host.network.NetworkEnvironment.online(this)) { enqueueSync(); reconcileWebSocket() }
+                } else stopForInvalidSession(
+                    expectedGeneration = generation.get(),
+                    expectedSession = runCatching { sessionStore.read() }.getOrNull(),
+                    onlyIfStillInvalid = true
+                )
+            } finally { if (!scheduler.isShutdown) schedulePeriodicSync() }
+        }, delay, TimeUnit.MILLISECONDS)
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        com.callagent.rtcmedia.NodeControlSocket.unlisten("madoka-background")
+        generation.incrementAndGet()
+        closeWebSocket()
+        unregisterConnectivityCallback()
+        scheduler.shutdownNow()
+        HostBackgroundRuntime.onServiceStopped(activeSession)
+        synchronized(notificationCoalescers) { notificationCoalescers.clear() }
+        synchronized(HostBackgroundService::class.java) {
+            if (liveService === this) liveService = null
+            isRunning = false
+        }
+        if (RuntimeState.preferences(this).getBoolean(RuntimeState.KEY_ENABLED, false)) {
+            RuntimeState.update(this, connection = "Waiting for service restart")
+        } else {
+            RuntimeState.update(this, connection = "Stopped")
+        }
+        super.onDestroy()
+    }
+
+    private fun startForegroundCompat() {
+        val notification = foregroundNotification()
+        if (Build.VERSION.SDK_INT >= 29) {
+            // Android 14+ declares the SMS cross-device remoteMessaging type; older versions use legacy NONE.
+            val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING else 0
+            startForeground(FOREGROUND_NOTIFICATION_ID, notification, type)
+        } else {
+            startForeground(FOREGROUND_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun enqueueSync(reason: String = "periodic") {
+        if (!isOptedInAndPaired() || !syncRequests.offer()) return
+        submitSync(reason)
+    }
+
+    private fun submitSync(reason: String) {
+        val expectedGeneration = generation.get()
+        try {
+            scheduler.execute {
+                try {
+                    if (expectedGeneration == generation.get() && isOptedInAndPaired()) {
+                        com.callagent.host.data.StandbyDiagnostics.withCause(reason) { runSync(expectedGeneration) }
+                    }
+                } finally {
+                    // Queue the follow-up on the executor: do not starve notification flush/reconnect tasks.
+                    if (syncRequests.complete()) submitSync(reason)
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            syncRequests.complete()
+        }
+    }
+
+    private fun runSync(expectedGeneration: Long) {
+        // No network at all differs from an unvalidated LAN; a VPN alone (airplane mode) counts as none.
+        if (!com.callagent.host.network.NetworkEnvironment.online(this)) return
+        NodeMonitor.maintain(this)
+        com.callagent.host.data.StandbyDiagnostics.checkpoint(this)
+        // Pick the best server node first; a switch rebinds this service and
+        // queues a fresh sync on the new node.
+        if (runCatching { NodeMonitor.evaluate(this, force = forceNodeProbe.getAndSet(false), background = true) }.getOrNull() != null) return
+        val bound = sessionStore.read()
+        if (bound == null || bound.role != "client") {
+            stopForInvalidSession(expectedGeneration = expectedGeneration)
+            return
+        }
+        val wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager).newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$packageName:host-sync"
+        ).apply { setReferenceCounted(false) }
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val deadline = startedAt + WAKE_LOCK_TIMEOUT_MS
+        var wakeToken: Long? = null
+        fun releaseSyncPower() {
+            if (wakeLock.isHeld) wakeLock.release()
+            wakeToken?.let { com.callagent.host.data.StandbyDiagnostics.wakeReleased(it) }
+            wakeToken = null
+        }
+        try {
+            wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS)
+            wakeToken = com.callagent.host.data.StandbyDiagnostics.wakeAcquired("host-sync", WAKE_LOCK_TIMEOUT_MS)
+            com.callagent.host.push.PushWakeHandoff.consumed(bound.sessionInstanceId, com.callagent.host.push.PushWakeHandoff.Channel.SYNC)
+            val expectedRunGeneration = expectedGeneration
+            val scopedCoalescer = notificationCoalescer(bound, expectedRunGeneration)
+            val syncPhase = com.callagent.host.data.StandbyDiagnostics.phaseStarted("host-sync-data", WAKE_LOCK_TIMEOUT_MS)
+            try { HostSyncEngine(
+                context = this,
+                boundSession = bound,
+                sessionIsCurrent = { expected -> isCurrent(expected, expectedGeneration) },
+                persistInboundNotificationIds = scopedCoalescer::record
+            ).use { engine ->
+                engine.sync(deadline)
+            } } finally {
+                com.callagent.host.data.StandbyDiagnostics.phaseEnded(syncPhase)
+                // Registration has its own opportunistic cadence; it must not
+                // extend the data-sync wake lock after notifications are saved.
+                releaseSyncPower()
+            }
+            if (!isCurrent(bound, expectedGeneration)) return
+            syncFailures = 0
+            com.callagent.host.network.NetworkEnvironment.succeeded()
+            RuntimeState.update(this, connection = if (socketLive) "Live updates connected" else "Periodic HTTPS sync", lastSyncAt = System.currentTimeMillis(), issue = null)
+            // A reachable node is the moment to register FCM where due; this is throttled.
+            PushRegistration.sync(this)
+            sendBroadcast(Intent(HostBackgroundRuntime.BACKGROUND_SYNCED).setPackage(packageName))
+            val latest = sessionStore.read()
+            if (latest != null && latest.sameSessionInstance(bound) && latest.accessToken != bound.accessToken) {
+                authReconnectPending.set(false)
+                closeWebSocket()
+                scheduleWebSocketReconnect(300L, recovery = true)
+            } else if (authReconnectPending.compareAndSet(true, false)) {
+                scheduleWebSocketReconnect(300L, recovery = true)
+            }
+        } catch (_: SyncBudgetExhausted) {
+            if (isCurrent(bound, expectedGeneration)) {
+                RuntimeState.update(this, connection = "Periodic HTTPS sync", issue = "Sync paused at its time limit; it will continue on the next check.")
+            }
+        } catch (_: SessionNeedsPairing) {
+            if (thisRunStillOwnsSession(bound, expectedGeneration)) {
+                stopForInvalidSession("Session expired or was revoked. Pair again to resume background sync.", expectedGeneration, bound)
+            }
+        } catch (_: SessionChanged) {
+            if (thisRunStillOwnsSession(bound, expectedGeneration)) {
+                stopForInvalidSession("The paired account changed. Open the app to resume background sync for this account.", expectedGeneration, bound)
+            }
+        } catch (_: Exception) {
+            com.callagent.host.network.NetworkEnvironment.failed()
+            forceNodeProbe.set(true)
+            syncFailures = (syncFailures + 1).coerceAtMost(5)
+            if (isCurrent(bound, expectedGeneration)) {
+                RuntimeState.update(this, connection = "Periodic HTTPS sync", issue = "Server unavailable; retrying over HTTPS.")
+            }
+        } finally {
+            releaseSyncPower()
+            val currentSession = runCatching { sessionStore.read() }.getOrNull()
+            val stillEnabled = RuntimeState.preferences(this).getBoolean(RuntimeState.KEY_ENABLED, false)
+            // Ordinary service recreation preserves alerts for the same pairing. Only an
+            // explicit stop or pairing change discards the old session's pending alerts.
+            if (!stillEnabled || currentSession?.sameProfile(bound) != true) {
+                cancelPendingNotifications(bound)
+            }
+        }
+    }
+
+    private fun rebindToActiveNode() {
+        val session = runCatching { sessionStore.read() }.getOrNull() ?: return
+        if (!isBoundToOptIn(session)) return
+        generation.incrementAndGet()
+        closeWebSocket()
+        reconnectAttempt.set(0)
+        cancelWebSocketRetry()
+        retryAfterNotBefore=0L
+        activeSession = session
+        scheduler.execute {
+            enqueueSync()
+            ensureWebSocket()
+        }
+    }
+
+    private fun isCurrent(expected: HostSession, expectedGeneration: Long): Boolean {
+        if (expectedGeneration != generation.get()) return false
+        if (!isBoundToOptIn(expected)) return false
+        val current = runCatching { sessionStore.read() }.getOrNull() ?: return false
+        return current.sameSessionInstance(expected) && current.role == "client"
+    }
+
+    private fun thisRunStillOwnsSession(expected: HostSession, expectedGeneration: Long): Boolean {
+        if (expectedGeneration != generation.get()) return false
+        val current = runCatching { sessionStore.read() }.getOrNull() ?: return true
+        return current.sameSessionInstance(expected)
+    }
+
+    private fun isOptedInAndPaired(): Boolean {
+        val session = runCatching { sessionStore.read() }.getOrNull()
+        return isBoundToOptIn(session)
+    }
+
+    private fun isBoundToOptIn(session: HostSession?): Boolean {
+        if (session == null || session.role != "client") return false
+        val state = RuntimeState.preferences(this)
+        return state.getBoolean(RuntimeState.KEY_ENABLED, false) &&
+            state.getString(RuntimeState.KEY_SESSION_STAMP, null) == sessionStamp(session) &&
+            state.getString(RuntimeState.KEY_SESSION_DB_NAME, null) == session.databaseName()
+    }
+
+    private fun stopForInvalidSession(
+        message: String = "",
+        expectedGeneration: Long? = null,
+        expectedSession: HostSession? = null,
+        onlyIfStillInvalid: Boolean = false
+    ) {
+        if (expectedGeneration != null && expectedGeneration != generation.get()) return
+        val current = runCatching { sessionStore.read() }.getOrNull()
+        if (expectedSession != null) {
+            if (current != null && !current.sameSessionInstance(expectedSession)) return
+            if (RuntimeState.preferences(this).getString(RuntimeState.KEY_SESSION_STAMP, null) != sessionStamp(expectedSession)) return
+            if (onlyIfStillInvalid && isBoundToOptIn(expectedSession)) return
+        }
+        val preferences = RuntimeState.preferences(this)
+        if (!preferences.getBoolean(RuntimeState.KEY_ENABLED, false)) return
+        preferences.edit().putBoolean(RuntimeState.KEY_ENABLED, false).commit()
+        closeWebSocket()
+        generation.incrementAndGet()
+        cancelPendingNotifications()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        RuntimeState.update(this, connection = "Stopped", issue = message.takeIf { it.isNotBlank() })
+        stopSelf()
+    }
+
+    private fun stopFromUser(): Boolean {
+        if (!RuntimeState.preferences(this).edit().putBoolean(RuntimeState.KEY_ENABLED, false).commit()) {
+            RuntimeState.update(this, issue = "Could not save the stopped state. Tap Stop again to retry.")
+            return false
+        }
+        closeWebSocket()
+        generation.incrementAndGet()
+        cancelPendingNotifications()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        RuntimeState.update(this, connection = "Stopped", issue = null)
+        stopSelf()
+        return true
+    }
+
+    private fun setConnection(label: String) {
+        if (isOptedInAndPaired()) RuntimeState.update(this, connection = label)
+    }
+
+    private fun notificationCoalescer(session: HostSession, expectedGeneration: Long): InboundNotificationCoalescer {
+        val databaseName = session.databaseName()
+        return synchronized(notificationCoalescers) {
+            val key = "$databaseName:${session.sessionInstanceId}:$expectedGeneration"
+            notificationCoalescers.getOrPut(key) { InboundNotificationCoalescer(this, databaseName, session, expectedGeneration) }
+        }
+    }
+
+    private fun cancelPendingNotifications(session: HostSession? = null) {
+        val selected = synchronized(notificationCoalescers) {
+            if (session == null) notificationCoalescers.values.toList()
+            else notificationCoalescers.values.filter { it.isForSession(session) }
+        }
+        selected.forEach { it.cancelAndClear() }
+        if (session == null) {
+            val state = RuntimeState.preferences(this)
+            clearPending(this, state.getString(RuntimeState.KEY_SESSION_DB_NAME, null), state.getString(RuntimeState.KEY_SESSION_STAMP, null))
+        } else {
+            val dbName = session.databaseName()
+            clearPending(this, dbName, sessionStamp(session))
+        }
+    }
+
+    /**
+     * Push from a reception v2 node wakes this phone for its calls and
+     * messages, so no socket is kept to that node: it would only add the
+     * node's pings, each of which wakes a sleeping phone.
+     */
+    private fun pushCovers(session: HostSession?): Boolean {
+        if (session == null || !com.callagent.host.calls.ReceptionV2.active(this, session)) return false
+        val confirmed = com.callagent.host.calls.ReceptionV2.confirmed(this, session.sessionInstanceId) ?: return false
+        return confirmed.sms && runCatching { PushRegistration.isReady(this, session.sessionInstanceId) }.getOrDefault(false)
+    }
+
+    /** Opens or closes the socket as [pushCovers] now says. */
+    private fun reconcileWebSocket() {
+        val session = runCatching { sessionStore.read() }.getOrNull()
+        if(session!=null && com.callagent.rtcmedia.NodeControlSocket.live(session.apiBaseUrl,session.accessToken)){
+            com.callagent.rtcmedia.NodeControlSocket.listen(session.apiBaseUrl,"madoka-background"){
+                if(isOptedInAndPaired()&&sessionStore.read()?.sameSessionInstance(session)==true){
+                    CallRuntime.requestCallSyncFromWakeHint()
+                    runCatching{com.callagent.host.push.PushWakeHandoff.begin(this,session.sessionInstanceId,com.callagent.host.push.PushWakeHandoff.Channel.SYNC)}
+                    enqueueSync("control_socket")
+                }
+            }
+            if(socket!=null)closeWebSocket()
+            CallRuntime.wakeChannelLive=true;setConnection("Live updates connected");return
+        }
+        if (pushCovers(session)) {
+            if (socket != null) {
+                com.callagent.host.data.StandbyDiagnostics.event("wss_push_covers")
+                closeWebSocket()
+                setConnection("Push wake-ups")
+            }
+        } else if (socket == null) ensureWebSocket()
+    }
+
+    // Ordinary retries may be expedited by network/identity recovery; Retry-After may not.
+    @Volatile private var reconnectNotBefore=0L
+    @Volatile private var retryAfterNotBefore=0L
+    private var reconnectFuture:java.util.concurrent.ScheduledFuture<*>?=null
+    private val reconnectTicket=AtomicLong()
+    private fun ensureWebSocket() {
+        if(authReconnectPending.get()||SystemClock.elapsedRealtime()<maxOf(reconnectNotBefore,retryAfterNotBefore))return
+        if (!com.callagent.host.network.NetworkEnvironment.online(this)) return
+        synchronized(webSocketLock) {
+            if (!isOptedInAndPaired() || socket != null) return
+            val session = sessionStore.read() ?: return
+            if(com.callagent.rtcmedia.NodeControlSocket.live(session.apiBaseUrl,session.accessToken)){reconcileWebSocket();return}
+            if (pushCovers(session)) { setConnection("Push wake-ups"); return }
+            val expectedGeneration = generation.get()
+            // A reception v2 node pings at the interval asked for, and alone.
+            val heartbeatRoot = session.apiBaseUrl.takeIf { com.callagent.host.calls.ReceptionV2.active(this, session) }
+            val clientPings=com.callagent.rtcmedia.NodeControlSocket.supports(session.apiBaseUrl,"client_ping_v1")
+            val request = try {
+                Request.Builder()
+                    .url(hostWakeWebSocketUrl(session.apiBaseUrl))
+                    .header("Authorization", "Bearer ${session.accessToken}")
+                    .apply { if(!clientPings)heartbeatRoot?.let { header("Wake-Ping-Seconds", WakeHeartbeat.seconds(this@HostBackgroundService, it).toString()) } }
+                    .build()
+            } catch (_: Exception) {
+                scheduleReconnectWithBackoff()
+                return
+            }
+            val client = if(clientPings) wsClient.newBuilder().pingInterval(heartbeatRoot?.let{WakeHeartbeat.seconds(this@HostBackgroundService,it).toLong()}?:25L,TimeUnit.SECONDS).build() else if (heartbeatRoot != null) wsClient.newBuilder().pingInterval(0, TimeUnit.SECONDS).build() else wsClient
+            fun heartbeatEnded(failed: Boolean) {
+                val openedAt = socketOpenedAt
+                if (heartbeatRoot != null && openedAt != 0L) WakeHeartbeat.ended(this@HostBackgroundService, heartbeatRoot,
+                    SystemClock.elapsedRealtime() - openedAt, failed && com.callagent.host.network.NetworkEnvironment.online(this@HostBackgroundService))
+            }
+            val localSocketGeneration = socketGeneration.incrementAndGet()
+            socketNetwork = runCatching { connectivityManager.activeNetwork }.getOrNull()
+            socket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                if (!isSocketCurrent(session, expectedGeneration, localSocketGeneration)) {
+                    webSocket.close(1000, null)
+                    return
+                }
+                // The backoff resets only once the socket proves stable: on a
+                // weak signal a socket that opens and drops at once otherwise
+                // reconnected, with a full sync, about every second.
+                com.callagent.host.data.StandbyDiagnostics.event("wss_open")
+                socketOpenedAt = SystemClock.elapsedRealtime()
+                socketLive = true
+                CallRuntime.wakeChannelLive = true
+                setConnection("Live updates connected")
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (!isSocketCurrent(session, expectedGeneration, localSocketGeneration)) return
+                val hint = runCatching { JSONObject(text) }.getOrNull() ?: return
+                if (hint.optInt("protocol_version", -1) == 1 && hint.optString("type") == "sync_required") {
+                    // The websocket is only a wake hint; all data comes from the authenticated HTTPS event API.
+                    // A reception v2 node says which domain changed; otherwise both may have.
+                    val domains = hint.optJSONArray("domains")?.let { list -> (0 until list.length()).map(list::optString).toSet() }
+                    if (domains == null) CallRuntime.requestCallSyncFromWakeHint()
+                    else if ("call" in domains && !CallRuntime.requestCallSyncFromWakeHint()) {
+                        // Call control may have stopped to wait for an invitation; start it.
+                        runCatching { CallRuntime.wakeFromPush(this@HostBackgroundService) }
+                    }
+                    if (domains == null || "sms" in domains) {
+                        // With idle reception asleep this packet may be all that woke the
+                        // CPU: bridge it to the sync's own lock, which runSync consumes.
+                        if (isOptedInAndPaired()) runCatching {
+                            com.callagent.host.push.PushWakeHandoff.begin(this@HostBackgroundService,
+                                session.sessionInstanceId, com.callagent.host.push.PushWakeHandoff.Channel.SYNC)
+                        }
+                        enqueueSync("websocket")
+                    }
+                }
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) = Unit
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                webSocket.close(code, null)
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                val current = isSocketCurrent(session, expectedGeneration, localSocketGeneration)
+                if (current) heartbeatEnded(failed = false)
+                clearSocket(webSocket)
+                if (current) {
+                    setConnection("Periodic HTTPS sync")
+                    if (code == 1008) {
+                        authReconnectPending.set(true)
+                        cancelWebSocketRetry()
+                        enqueueSync()
+                        return
+                    }
+                    enqueueSync()
+                    scheduleReconnectWithBackoff()
+                }
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
+                // Only a socket still wanted counts: closing it on purpose also lands here.
+                val current = isSocketCurrent(session, expectedGeneration, localSocketGeneration)
+                if (current) heartbeatEnded(failed = response == null)
+                clearSocket(webSocket)
+                if (!current) return
+                if(response?.code==429){
+                    val seconds=response.header("Retry-After")?.toLongOrNull()?.coerceIn(1,86400)?:60L
+                    com.callagent.rtcmedia.NodeControlSocket.rateLimited(session.apiBaseUrl,seconds)
+                    synchronized(webSocketLock){retryAfterNotBefore=maxOf(retryAfterNotBefore,SystemClock.elapsedRealtime()+seconds*1000)}
+                    scheduleWebSocketReconnect(seconds*1000,recovery=true);return
+                }
+                // A 401/1008 close is repaired by HTTPS token refresh in the next sync before reconnect.
+                setConnection("Periodic HTTPS sync")
+                // The active node may be gone (a VPN dropped): check now, not on the next timer.
+                forceNodeProbe.set(true)
+                if (response?.code == 401) {
+                    authReconnectPending.set(true)
+                    cancelWebSocketRetry()
+                    enqueueSync()
+                    return
+                }
+                enqueueSync()
+                scheduleReconnectWithBackoff()
+            }
+            })
+        }
+    }
+
+    private fun isSocketCurrent(expected: HostSession, expectedGeneration: Long, expectedSocketGeneration: Long): Boolean {
+        if (expectedGeneration != generation.get() || !isOptedInAndPaired()) return false
+        if (expectedSocketGeneration != socketGeneration.get()) return false
+        val current = runCatching { sessionStore.read() }.getOrNull() ?: return false
+        return isCurrentBackgroundSession(expected, current)
+    }
+
+    private fun clearSocket(candidate: WebSocket) = synchronized(webSocketLock) {
+        if (socket === candidate) {
+            com.callagent.host.network.NetworkEnvironment.failed()
+            com.callagent.host.data.StandbyDiagnostics.event("wss_closed")
+            socket = null
+            socketLive = false
+            CallRuntime.wakeChannelLive = false
+        }
+    }
+
+    private fun closeWebSocket() {
+        val old = synchronized(webSocketLock) {
+            socketGeneration.incrementAndGet()
+            socket.also { socket = null }
+        }
+        socketLive = false
+        CallRuntime.wakeChannelLive = false
+        if (old != null) com.callagent.host.data.StandbyDiagnostics.event("wss_closed")
+        old?.cancel()
+    }
+
+    private fun scheduleReconnectWithBackoff() {
+        if (!isOptedInAndPaired()) return
+        val openedAt = socketOpenedAt
+        socketOpenedAt = 0L
+        if (openedAt != 0L && SystemClock.elapsedRealtime() - openedAt >= STABLE_SOCKET_MS) reconnectAttempt.set(0)
+        val attempt = reconnectAttempt.getAndIncrement()
+        val delay = HostBackgroundPolicy.backoffDelay(attempt, Random.nextDouble(0.75, 1.25))
+        scheduleWebSocketReconnect(delay)
+    }
+
+    private fun cancelWebSocketRetry()=synchronized(webSocketLock){
+        reconnectTicket.incrementAndGet();reconnectFuture?.cancel(false);reconnectFuture=null;reconnectNotBefore=0L
+    }
+
+    private fun scheduleWebSocketReconnect(delayMs: Long, recovery:Boolean=false) {
+        if (!isOptedInAndPaired()) return
+        synchronized(webSocketLock){
+            if(authReconnectPending.get())return
+            val now=SystemClock.elapsedRealtime()
+            val due=maxOf(now+delayMs.coerceAtLeast(500L),retryAfterNotBefore)
+            // Periodic sync must not replace a pending failure retry; a real recovery may.
+            if(!recovery&&reconnectFuture!=null)return
+            reconnectFuture?.cancel(false)
+            val ticket=reconnectTicket.incrementAndGet()
+            reconnectNotBefore=due
+            val expectedGeneration=generation.get()
+            reconnectFuture=scheduler.schedule({
+                synchronized(webSocketLock){
+                    if(ticket!=reconnectTicket.get())return@schedule
+                    reconnectFuture=null;reconnectNotBefore=0L
+                }
+                if(expectedGeneration==generation.get()&&socket==null&&isOptedInAndPaired())ensureWebSocket()
+            },(due-now).coerceAtLeast(0L),TimeUnit.MILLISECONDS)
+        }
+    }
+
+    private fun registerConnectivityCallback() {
+        try {
+            connectivityManager.registerDefaultNetworkCallback(networkCallback)
+            callbackRegistered = true
+        } catch (_: RuntimeException) {
+            callbackRegistered = false
+        }
+    }
+
+    private fun unregisterConnectivityCallback() {
+        if (!callbackRegistered) return
+        runCatching { connectivityManager.unregisterNetworkCallback(networkCallback) }
+        callbackRegistered = false
+    }
+
+    private fun createNotificationChannels() {
+        HostNotificationChannels.ensure(this)
+    }
+
+    private fun foregroundNotification(): Notification {
+        val stopIntent = PendingIntent.getService(
+            this,
+            STOP_PENDING_INTENT,
+            Intent(this, HostBackgroundService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        return notificationBuilder(CHANNEL_SERVICE)
+            .setSmallIcon(R.drawable.ic_stat_host)
+            .setContentTitle("短信同步运行中")
+            .setContentText("正在通过服务器接收远程 SIM 的短信")
+            .setContentIntent(openAppPendingIntent())
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .setVisibility(Notification.VISIBILITY_SECRET)
+            .setShowWhen(false)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .addAction(0, "停止", stopIntent)
+            .build()
+    }
+
+    private fun openAppPendingIntent(openSms: Boolean = false): PendingIntent = PendingIntent.getActivity(
+        this,
+        if (openSms) OPEN_SMS_PENDING_INTENT else OPEN_APP_PENDING_INTENT,
+        Intent(this, MainActivity::class.java)
+            .apply { if (openSms) action = ACTION_SHOW_SMS }
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    private fun notificationBuilder(channel: String): Notification.Builder =
+        if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, channel) else Notification.Builder(this)
+
+    private inner class InboundNotificationCoalescer(
+        private val context: Context,
+        private val databaseName: String,
+        private val boundSession: HostSession,
+        private val expectedGeneration: Long
+    ) {
+        private val preferences = context.getSharedPreferences(
+            "host-background-notifications-$databaseName-${sessionStamp(boundSession)}",
+            Context.MODE_PRIVATE
+        )
+        private val lock = Any()
+        private var scheduled = false
+        private var scheduledFlush: java.util.concurrent.ScheduledFuture<*>? = null
+        private var lastUnacknowledgedPostIds: List<String> = emptyList()
+
+        init {
+            if (readIds(PENDING_IDS).isNotEmpty()) scheduleFlushLocked()
+        }
+
+        fun record(ids: List<String>): Boolean {
+            if (ids.isEmpty()) return true
+            return synchronized(lock) {
+                val pending = readIds(PENDING_IDS)
+                val recentlyNotified = readIds(NOTIFIED_IDS)
+                val nextPending = InboundNotificationDelivery.appendPendingIds(
+                    pending, recentlyNotified, ids, MAX_COALESCED_IDS
+                ) ?: return@synchronized false
+                if (nextPending == pending) {
+                    // A prior SharedPreferences commit may have failed after
+                    // changing its in-memory view. Recommit pending IDs before
+                    // allowing the SQLite journal to be acknowledged.
+                    if (ids.none { it in pending }) return@synchronized true
+                    val saved = preferences.edit().putString(PENDING_IDS, encodeIds(pending)).commit()
+                    if (saved) scheduleFlushLocked()
+                    return@synchronized saved
+                }
+                val saved = preferences.edit().putString(PENDING_IDS, encodeIds(nextPending)).commit()
+                if (saved) scheduleFlushLocked()
+                saved
+            }
+        }
+
+        private fun scheduleFlushLocked(delayOverrideMs: Long? = null) {
+            if (scheduled) return
+            scheduled = true
+            val elapsed = System.currentTimeMillis() - preferences.getLong(LAST_POSTED_AT, 0L)
+            val delay = delayOverrideMs ?: (NOTIFICATION_WINDOW_MS - elapsed).coerceAtLeast(0L)
+            scheduledFlush = scheduler.schedule({ flush() }, delay, TimeUnit.MILLISECONDS)
+        }
+
+        private fun flush() {
+            synchronized(lock) {
+                scheduled = false
+                scheduledFlush = null
+                if (!isCurrent(boundSession, expectedGeneration)) return
+                val pending = readIds(PENDING_IDS)
+                if (pending.isEmpty()) return
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val notificationsAvailable = manager.areNotificationsEnabled() &&
+                    manager.getNotificationChannel(CHANNEL_INBOUND)?.importance != NotificationManager.IMPORTANCE_NONE &&
+                    (Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                if (!notificationsAvailable) {
+                    RuntimeState.update(context, issue = "Enable notifications to receive inbound SMS alerts.")
+                    scheduleFlushLocked(FALLBACK_SYNC_MS)
+                    return
+                }
+                val stamp = sessionStamp(boundSession)
+                val records = runCatching {
+                    ClientDatabase(context, databaseName).use { it.loadMessagesByServerIds(pending) }
+                }.getOrDefault(emptyList()).filter { it.direction == "inbound" }
+                val posts = runCatching {
+                    InboundSmsNotifications.compose(context, stamp, INBOUND_NOTIFICATION_ID, records) { simId ->
+                        SimLabels.describe(context, simId)
+                    }
+                }.getOrDefault(emptyList()).ifEmpty {
+                    // The cache could not supply the messages: fall back to a count-only alert.
+                    listOf(InboundSmsNotifications.Post(INBOUND_NOTIFICATION_ID, notificationBuilder(CHANNEL_INBOUND)
+                        .setSmallIcon(R.drawable.ic_stat_sms)
+                        .setContentTitle("新短信")
+                        .setContentText(if (pending.size == 1) "打开应用查看短信。" else "收到 ${pending.size} 条新短信。")
+                        .setContentIntent(openAppPendingIntent(openSms = true))
+                        .setVisibility(Notification.VISIBILITY_PRIVATE)
+                        .setAutoCancel(true)
+                        .setOnlyAlertOnce(pending == lastUnacknowledgedPostIds)
+                        .build()))
+                }
+                val oldPending = pending
+                val oldNotified = readIds(NOTIFIED_IDS)
+                val oldPostedAt = preferences.getLong(LAST_POSTED_AT, 0L)
+                val result = InboundNotificationDelivery.postThenAcknowledge(
+                    post = { posts.forEach { manager.notify(stamp, it.id, it.notification) } },
+                    acknowledge = {
+                        val recentlyNotified = (oldNotified + pending).distinct().takeLast(MAX_SEEN_NOTIFICATION_IDS)
+                        val persisted = preferences.edit()
+                            .putString(PENDING_IDS, "[]")
+                            .putString(NOTIFIED_IDS, encodeIds(recentlyNotified))
+                            .putLong(LAST_POSTED_AT, System.currentTimeMillis())
+                            .commit()
+                        persisted
+                    },
+                    restorePending = {
+                        restorePreferenceSnapshot(oldPending, oldNotified, oldPostedAt)
+                    }
+                )
+                if (result != InboundNotificationDelivery.Result.POST_FAILED) {
+                    runCatching { InboundSmsNotifications.autoCopy(context, records) }
+                }
+                when (result) {
+                    InboundNotificationDelivery.Result.ACKNOWLEDGED -> lastUnacknowledgedPostIds = emptyList()
+                    InboundNotificationDelivery.Result.POST_FAILED -> {
+                        RuntimeState.update(context, issue = "Android could not post the inbound SMS notification.")
+                        scheduleFlushLocked(FALLBACK_SYNC_MS)
+                    }
+                    InboundNotificationDelivery.Result.ACK_FAILED -> {
+                        lastUnacknowledgedPostIds = pending
+                        RuntimeState.update(context, issue = "The inbound SMS notification will be retried.")
+                        scheduleFlushLocked(FALLBACK_SYNC_MS)
+                    }
+                }
+            }
+        }
+
+        private fun restorePreferenceSnapshot(pending: List<String>, notified: List<String>, postedAt: Long) {
+            val editor = preferences.edit()
+                .putString(PENDING_IDS, encodeIds(pending))
+                .putString(NOTIFIED_IDS, encodeIds(notified))
+                .putLong(LAST_POSTED_AT, postedAt)
+            if (!editor.commit()) editor.apply()
+        }
+
+        fun isForSession(session: HostSession): Boolean = boundSession.sameSessionInstance(session)
+
+        fun cancelAndClear() {
+            synchronized(lock) {
+                scheduledFlush?.cancel(false)
+                scheduledFlush = null
+                scheduled = false
+                lastUnacknowledgedPostIds = emptyList()
+                preferences.edit().putString(PENDING_IDS, "[]").commit()
+                clearPending(context, databaseName, sessionStamp(boundSession))
+            }
+        }
+
+        private fun readIds(key: String): List<String> = runCatching {
+            val json = JSONArray(preferences.getString(key, "[]") ?: "[]")
+            (0 until json.length()).mapNotNull { index -> json.optString(index).takeIf { it.isNotBlank() } }
+        }.getOrDefault(emptyList())
+
+        private fun encodeIds(ids: List<String>): String = JSONArray().also { array -> ids.forEach { array.put(it) } }.toString()
+    }
+
+    companion object {
+        const val ACTION_START = "com.callagent.host.background.START"
+        const val ACTION_STOP = "com.callagent.host.background.STOP"
+        const val ACTION_SHOW_SMS = "com.callagent.host.SHOW_SMS"
+        private const val FOREGROUND_NOTIFICATION_ID = 7101
+        private const val INBOUND_NOTIFICATION_ID = 7102
+        private const val STOP_PENDING_INTENT = 7103
+        private const val OPEN_APP_PENDING_INTENT = 7104
+        private const val OPEN_SMS_PENDING_INTENT = 7105
+        internal const val CHANNEL_SERVICE = HostNotificationChannels.BACKGROUND_SERVICE
+        internal const val CHANNEL_INBOUND = HostNotificationChannels.INBOUND_SMS
+        private const val WAKE_LOCK_TIMEOUT_MS = 60_000L
+        private const val FALLBACK_SYNC_MS = 30_000L
+        private const val STABLE_SOCKET_MS = 60_000L
+        private const val NETWORK_SETTLE_MS = 2_000L
+        private const val NOTIFICATION_WINDOW_MS = 12_000L
+        private const val MAX_COALESCED_IDS = 99
+        private const val MAX_SEEN_NOTIFICATION_IDS = 2_048
+        private const val PENDING_IDS = "pending_ids"
+        private const val NOTIFIED_IDS = "notified_ids"
+        private const val LAST_POSTED_AT = "last_posted_at"
+        @Volatile internal var isRunning: Boolean = false
+            private set
+        @Volatile private var liveService: HostBackgroundService? = null
+
+        internal fun onNetworkEnvironmentChanged() {
+            liveService?.takeIf { isRunning }?.let { service ->
+                service.syncFailures = 0
+                service.forceNodeProbe.set(true)
+                service.closeWebSocket()
+                service.enqueueSync("network")
+                service.scheduleWebSocketReconnect(500L, recovery = true)
+            }
+        }
+
+        internal fun requestSync(context: Context) {
+            liveService?.takeIf { isRunning }?.enqueueSync("push")
+        }
+
+        internal fun stopByUser(): Boolean = liveService?.stopFromUser() ?: true
+
+        /** The active server node changed: drop the old node's socket and sync the new one. */
+        internal fun onActiveNodeChanged() {
+            liveService?.takeIf { isRunning }?.rebindToActiveNode()
+        }
+
+        internal fun clearPending(context: Context, databaseName: String?, sessionStamp: String? = null) {
+            if (databaseName.isNullOrBlank()) return
+            if (!sessionStamp.isNullOrBlank()) {
+                context.getSharedPreferences("host-background-notifications-$databaseName-$sessionStamp", Context.MODE_PRIVATE)
+                    .edit().clear().commit()
+            }
+            val current = runCatching { SessionStore(context.applicationContext).read() }.getOrNull()
+            val currentDb = current?.let { it.databaseName() }
+            val belongsToNewPairing = current != null && currentDb == databaseName &&
+                sessionStamp != null && com.callagent.host.background.sessionStamp(current) != sessionStamp
+            if (!belongsToNewPairing) clearBackgroundAlertQueue(context.applicationContext, databaseName)
+            if (sessionStamp != null) {
+                (context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager)?.cancel(sessionStamp, INBOUND_NOTIFICATION_ID)
+                InboundSmsNotifications.cancelAll(context, sessionStamp)
+            }
+        }
+    }
+}
+
+private fun clearBackgroundAlertQueue(context: Context, databaseName: String) {
+    runCatching {
+        val database = ClientDatabase(context, databaseName)
+        try {
+            database.clearBackgroundNotificationQueue()
+        } finally {
+            database.close()
+        }
+    }
+}

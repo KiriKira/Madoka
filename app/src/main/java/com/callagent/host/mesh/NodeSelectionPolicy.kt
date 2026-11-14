@@ -1,0 +1,95 @@
+package com.callagent.host.mesh
+
+/** What one probe of a server node observed. */
+data class NodeObservation(
+    val reachable: Boolean,
+    /** The account's old phone is online on this node (matched by install ID). */
+    val gatewayOnline: Boolean,
+    val rttMillis: Long?,
+    val issue: String? = null,
+    /** This account's gateway on that node (the IDs differ per node). */
+    val gatewayId: String? = null,
+    /** The old phone advertises call control on that node, so calls work through it. */
+    val callReady: Boolean = false
+)
+
+/** Health of one node as of its latest probe, persisted between probes. */
+data class NodeHealth(
+    val consecutiveFailures: Int = 0,
+    val consecutiveSuccesses: Int = 0,
+    val rttMillis: Long? = null,
+    val gatewayOnline: Boolean = false,
+    val checkedAt: Long = 0L,
+    val issue: String? = null,
+    val gatewayId: String? = null,
+    val callReady: Boolean = false
+) {
+    val healthy: Boolean get() = consecutiveSuccesses > 0
+}
+
+/**
+ * Pure node choice, from each node's state now rather than its history.
+ * Nodes are tried in the user's priority order:
+ * - failover: the active node's latest probe failed (unreachable, old phone
+ *   offline there, or too slow; [NodeMonitor] re-probes it once first) → the
+ *   first node that is healthy now. A failed node cannot carry an SMS, so
+ *   only a call in progress holds it (switching rebinds the call engine);
+ * - failback: a higher-priority node was healthy for [FAILBACK_AFTER_SUCCESSES]
+ *   probes in a row → return to it, so a flapping link does not bounce; never
+ *   while busy (an SMS submission or a call is in flight).
+ */
+object NodeSelectionPolicy {
+    const val MAX_HEALTHY_RTT_MS = 3_000L
+    const val FAILBACK_AFTER_SUCCESSES = 2
+
+    fun healthy(observation: NodeObservation): Boolean =
+        observation.reachable && observation.gatewayOnline &&
+            (observation.rttMillis ?: Long.MAX_VALUE) <= MAX_HEALTHY_RTT_MS
+
+    fun record(previous: NodeHealth?, observation: NodeObservation, now: Long): NodeHealth {
+        val before = previous ?: NodeHealth()
+        val ok = healthy(observation)
+        return NodeHealth(
+            consecutiveFailures = if (ok) 0 else before.consecutiveFailures + 1,
+            consecutiveSuccesses = if (ok) before.consecutiveSuccesses + 1 else 0,
+            rttMillis = observation.rttMillis,
+            gatewayOnline = observation.gatewayOnline,
+            checkedAt = now,
+            gatewayId = observation.gatewayId ?: before.gatewayId,
+            callReady = ok && observation.callReady,
+            issue = observation.issue ?: when {
+                !observation.reachable -> "无法连接"
+                !observation.gatewayOnline -> "旧手机不在线"
+                !ok -> "延迟过高"
+                else -> null
+            }
+        )
+    }
+
+    /**
+     * @param priority node keys, highest priority first; only nodes that hold a session.
+     * @return the node to switch to, or null to stay on [active].
+     */
+    fun choose(
+        priority: List<String>,
+        active: String?,
+        health: Map<String, NodeHealth>,
+        busy: Boolean,
+        callInProgress: Boolean = busy
+    ): String? {
+        if (priority.isEmpty()) return null
+        val activeIndex = if (active == null) -1 else priority.indexOf(active)
+        if (activeIndex < 0) return priority.firstOrNull { health[it]?.healthy == true }
+        val activeHealth = health[active]
+        if (activeHealth != null && activeHealth.checkedAt > 0L && !activeHealth.healthy) {
+            if (callInProgress) return null
+            return priority.firstOrNull { it != active && health[it]?.healthy == true }
+        }
+        if (busy) return null
+        for (index in 0 until activeIndex) {
+            val key = priority[index]
+            if ((health[key]?.consecutiveSuccesses ?: 0) >= FAILBACK_AFTER_SUCCESSES) return key
+        }
+        return null
+    }
+}

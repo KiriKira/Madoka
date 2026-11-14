@@ -1,0 +1,297 @@
+package com.callagent.rtcmedia
+
+import android.content.Context
+import android.util.Log
+import org.json.JSONObject
+import org.webrtc.PeerConnection
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+fun interface MediaApi {
+    /** Paths are relative to the existing authenticated /v1 API. Implementations
+     * retain the same bound session and refresh/revocation rules as other calls. */
+    fun request(method: String, path: String, body: JSONObject?): JSONObject
+}
+class MediaApiException(val status: Int, val code: String) : Exception(code)
+
+/** One immutable, server-authorized WebRTC audio leg. All SDP stays out of logs.
+ * Signaling uses authenticated HTTPS; existing SIP controls the business call.
+ * No method here can dial, answer a cellular call, or switch back to RTP audio. */
+class RtcAudioSession(
+    private val context: Context,
+    admission: JSONObject,
+    private val api: MediaApi,
+    private val gateway: Boolean,
+    private val pcm: PcmBridge? = null,
+    private val onReady: () -> Unit = {},
+    private val onDigit: (Char) -> Unit = {},
+    private val onFailure: (String) -> Unit,
+    private val onLog: (String) -> Unit = {},
+    private val forceRelay: Boolean = false,
+    private val additionalRelaySources: List<RelaySource> = emptyList(),
+    currentRelayNodeId:String?=null
+) : AutoCloseable {
+    private val callControl = admission.optString("call_control", "sip")
+    private val binding = admission.getJSONObject("binding")
+    val callId: String = binding.getString("call_id")
+    val legId: String = binding.getString("leg_id")
+    private val attemptId = binding.getString("attempt_id")
+    private val selfId = binding.getString(if (gateway) "gateway_id" else "client_id")
+    private val remoteId = binding.getString(if (gateway) "client_id" else "gateway_id")
+    private val nodeServers = buildList {
+        val items = admission.getJSONArray("ice_servers")
+        for (i in 0 until items.length()) {
+            val item = items.getJSONObject(i)
+            val urls = item.getJSONArray("urls")
+            add(RelayIceServer((0 until urls.length()).map(urls::getString),
+                if (item.has("username")) item.getString("username") else null,
+                if (item.has("credential")) item.getString("credential") else null))
+        }
+    }
+    private val nodeRelayPolicy=RelayRepository.nodePolicy(context,currentRelayNodeId)
+    private val relaySelection=RelaySources.selectForCall(if(nodeRelayPolicy.first)nodeServers else emptyList(),additionalRelaySources,RelayRepository.cachedRank(context,nodeServers),nodeRelayPolicy.second).let(TurnCredentials::resolve)
+    private val servers = relaySelection.servers.map { item ->
+        PeerConnection.IceServer.builder(item.urls).apply {
+            item.username?.let(::setUsername)
+            item.credential?.let(::setPassword)
+        }.createIceServer()
+    }
+    private val worker=Executors.newSingleThreadScheduledExecutor { task -> Thread(task,"RTC-Signal-${callId.take(8)}") }
+    private val closed=AtomicBoolean()
+    private val started=AtomicBoolean()
+    private val failed=AtomicBoolean()
+    private val connectionLatch=CountDownLatch(1)
+    @Volatile private var peer:NativePeer?=null
+    @Volatile var isConnected=false;private set
+    @Volatile var cellularActive=false;private set
+    val isClosed: Boolean get() = closed.get()
+    private var descriptionApplied=false
+    private var readyReported=false
+    private var revision=1L
+    private var highestSequence=0L
+    private val consumedSequences=hashSetOf<Long>()
+    private data class PendingIce(val ice:JSONObject?,val operationId:String=UUID.randomUUID().toString(),val queuedAt:Long=System.nanoTime())
+    private val outgoingIce=java.util.ArrayDeque<PendingIce>()
+    private var localEndQueued=false
+    private var remoteEndSeen=false
+    private var startedAt=0L
+    private var disconnectedAt=0L
+    private var lastStats=0L
+    private var lastPoll=0L
+    private var generation=1
+    @Volatile private var desiredAudio=false
+    @Volatile private var desiredMute=false
+    private var everConnected=false
+
+    companion object {
+        /** Longer than any ring: an incoming call expires 25 s after it is offered. */
+        private const val UNUSED_PREPARATION_SECONDS=45L
+        fun isAvailable(context:Context)=NativePeer.isAvailable(context)
+        fun select(api:MediaApi,callId:String):JSONObject = api.request("POST","/calls/$callId/media",JSONObject().put("media_transport","webrtc"))
+    }
+    private val prepared=AtomicBoolean()
+    private var pendingOffer:String?=null
+    private var preparedAt=0L
+    @Volatile private var unusedExpiry:java.util.concurrent.ScheduledFuture<*>?=null
+
+    /**
+     * Builds the native peer and the local offer without signaling anything,
+     * so an incoming call can do this while it rings. The offer is posted by
+     * [start]: the server expires signal replay after 15 s, longer than a
+     * ring may last. An unused preparation discards itself.
+     */
+    fun prepare() {
+        if(!prepared.compareAndSet(false,true))return
+        preparedAt=System.nanoTime()
+        event("selected")
+        if(relaySelection.truncated)event("relay_sources_truncated")
+        relaySelection.fallbackReason?.let{event("relay_sources_fallback reason=$it")}
+        worker.execute {
+            try {
+                if(closed.get())return@execute
+                val native=NativePeer(context,callId,servers,pcm,::event,onDigit,{ reason -> runCatching { worker.execute { fail(reason) } }; Unit },forceRelay,relaySelection::sourcesForUrl,relaySelection.hasAdditionalSources)
+                if(closed.get()){native.close();return@execute};peer=native
+                native.mute(desiredMute);native.enableAudio(desiredAudio)
+                event("native_ready elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-preparedAt)}")
+                if(!gateway){
+                    pendingOffer=native.offer()
+                    event("offer_created elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-preparedAt)}")
+                }
+            }catch(_:Throwable){fail("native_or_offer_setup_failed")}
+        }
+        unusedExpiry=runCatching { worker.schedule({ if(!started.get()) discard() },UNUSED_PREPARATION_SECONDS,TimeUnit.SECONDS) }.getOrNull()
+    }
+
+    fun start() {
+        check(started.compareAndSet(false,true))
+        prepare()
+        worker.execute {
+            try {
+                if(closed.get() || failed.get())return@execute
+                checkNotNull(peer)
+                startedAt=System.nanoTime()
+                if(!gateway){
+                    refresh()
+                    send("offer",checkNotNull(pendingOffer))
+                    pendingOffer=null
+                    event("offer_sent prepared_ms=${TimeUnit.NANOSECONDS.toMillis(startedAt-preparedAt)}")
+                }
+                if(!closed.get())worker.scheduleWithFixedDelay(::poll,0,250,TimeUnit.MILLISECONDS)
+            }catch(_:Throwable){fail("native_or_offer_setup_failed")}
+        }
+    }
+    private fun poll() {
+        if(closed.get())return
+        val now=System.nanoTime()
+        // A host's call is up only once the gateway reports cellular audio,
+        // so keep polling briskly until then.
+        if(isConnected && (gateway || cellularActive) && outgoingIce.isEmpty() && peer?.hasQueuedCandidates!=true && localEndQueued && now-lastPoll<2_000_000_000L)return
+        lastPoll=now
+        try {
+            val result=refresh()
+            val state=result.getJSONObject("state")
+            val snapshot=state.getJSONObject("snapshot")
+            if(snapshot.getString("phase")=="closed"){fail("server_authorization_closed");return}
+            check(snapshot.getJSONObject("binding").getString("leg_id")==legId)
+            check(snapshot.getJSONObject("binding").getString("call_id")==callId)
+            generation=snapshot.getInt("generation")
+            check(generation==1){"unsupported_remote_restart"}
+            // The durable relay intentionally expires SDP/ICE replay after 15s.
+            // An already connected native peer retains the applied generation;
+            // it only needs fresh authorization, not stale SDP replay. A new or
+            // disconnected peer cannot reconstruct that generation from gaps.
+            if (!state.getBoolean("replay_complete")) {
+                check(descriptionApplied && peer?.isConnected == true) { "remote_replay_expired_before_connection" }
+            }
+            val signals=state.optJSONArray("signals") ?: org.json.JSONArray()
+            for(i in 0 until signals.length()){
+                val signal=signals.getJSONObject(i);val sequence=signal.getLong("sequence")
+                if(sequence in consumedSequences)continue
+                check(signal.getString("sender_id")==remoteId && signal.getString("recipient_id")==selfId && signal.getInt("generation")==generation)
+                when(signal.getString("kind")){
+                    "offer" -> {
+                        check(gateway && !descriptionApplied)
+                        descriptionApplied=true
+                        val answer=checkNotNull(peer).answer(signal.getString("sdp"))
+                        // Gathering may run while the other endpoint renews authority.
+                        refresh();send("answer",answer)
+                    }
+                    "answer" -> {
+                        check(!gateway && !descriptionApplied)
+                        descriptionApplied=true;checkNotNull(peer).remoteAnswer(signal.getString("sdp"));event("answer_applied")
+                    }
+                    "candidate" -> {
+                        check(descriptionApplied && !remoteEndSeen)
+                        val ice=signal.getJSONObject("ice")
+                        checkNotNull(peer).remoteCandidate(ice.getString("sdp_mid"),ice.getInt("sdp_mline_index"),ice.getString("candidate"))
+                    }
+                    "end_of_candidates" -> { check(descriptionApplied); remoteEndSeen=true }
+                    "close" -> {fail("remote_closed");return}
+                    else -> error("unsupported_signal")
+                }
+                highestSequence=sequence
+                consumedSequences.add(sequence)
+                check(consumedSequences.size<=132)
+            }
+            // Apply remote SDP before a burst of local ICE POSTs can delay it.
+            flushCandidates()
+            val connected=peer?.isConnected==true
+            isConnected=connected
+            if(connected){
+                everConnected=true;connectionLatch.countDown();disconnectedAt=0
+                if(!gateway && cellularActive && !readyReported){readyReported=true;event("media_and_cellular_ready");onReady()}
+            }else if(everConnected){
+                if(disconnectedAt==0L)disconnectedAt=now
+                if(now-disconnectedAt>10_000_000_000L){fail("ice_recovery_timeout");return}
+            }else if(now-startedAt>28_000_000_000L){fail("media_negotiation_timeout");return}
+            if(now-lastStats>5_000_000_000L){lastStats=now;peer?.stats()}
+        }catch(failure:MediaApiException){
+            if(failure.status in listOf(400,401,403,404,409,410,429)){fail("signal_${failure.code}")}
+            else if(System.nanoTime()-lastSuccessfulRead>10_000_000_000L)fail("signal_unavailable")
+        }catch(_:Throwable){fail("media_signal_or_native_failure")}
+    }
+    private var lastSuccessfulRead=System.nanoTime()
+    private fun refresh():JSONObject {
+        val result=api.request("GET","/rtc/legs/$legId",null)
+        val snapshot=result.getJSONObject("state").getJSONObject("snapshot")
+        revision=snapshot.getLong("revision")
+        cellularActive=result.getBoolean("cellular_active")
+        lastSuccessfulRead=System.nanoTime()
+        return result
+    }
+    private fun flushCandidates(){
+        val native=peer?:return
+        val batch=native.takeCandidates()
+        for(candidate in batch.candidates)outgoingIce.add(PendingIce(JSONObject()
+            .put("candidate",candidate.sdp).put("sdp_mid",candidate.sdpMid).put("sdp_mline_index",candidate.sdpMLineIndex)))
+        if(batch.complete && !localEndQueued){localEndQueued=true;outgoingIce.add(PendingIce(null))}
+        repeat(8){
+            val item=outgoingIce.peek()?:return
+            check(System.nanoTime()-item.queuedAt<10_000_000_000L){"candidate_delivery_timeout"}
+            send(if(item.ice==null)"end_of_candidates" else "candidate",ice=item.ice,operationId=item.operationId)
+            outgoingIce.remove()
+        }
+    }
+    private fun send(kind:String,sdp:String?=null,ice:JSONObject?=null,operationId:String=UUID.randomUUID().toString()){
+        val exactRevision=kind in setOf("offer","answer","restart")
+        var command=JSONObject().put("version",1).put("call_id",callId).put("leg_id",legId)
+            .put("attempt_id",attemptId).put("operation_id",operationId)
+            .put("generation",generation).put("revision",if(exactRevision)revision else 0).put("kind",kind)
+        if(sdp!=null)command.put("sdp",sdp)
+        if(ice!=null)command.put("ice",ice)
+        for(attempt in 0..8){
+            try {
+                val response=api.request("POST","/rtc/legs/$legId",command)
+                revision=response.getJSONObject("ack").getLong("revision")
+                if(kind!="candidate")event("${kind}_committed")
+                return
+            }catch(failure:MediaApiException){
+                if(failure.status!=409 || !exactRevision || attempt==8)throw failure
+                Thread.sleep(50)
+                refresh();command=JSONObject(command.toString()).put("revision",revision)
+            }
+        }
+    }
+    fun awaitConnected(timeoutMillis:Long):Boolean = connectionLatch.await(timeoutMillis,TimeUnit.MILLISECONDS) && peer?.isConnected==true && !closed.get()
+    fun enableAudio(enabled:Boolean){desiredAudio=enabled;if(!closed.get())peer?.enableAudio(enabled)}
+    fun mute(muted:Boolean){desiredMute=muted;if(!closed.get())peer?.mute(muted)}
+    fun sendDtmf(digits:String){check(!closed.get());checkNotNull(peer).sendDtmf(digits)}
+    fun markCellularActive(){
+        worker.execute {
+            if(closed.get())return@execute
+            try {api.request("POST","/calls/$callId/media/active",JSONObject().put("leg_id",legId));cellularActive=true;event("cellular_active")}
+            catch(_:Throwable){fail("cellular_authority_update_failed")}
+        }
+    }
+    private fun event(event:String){
+        if(event.startsWith("stats "))Regex("relay_sources=([^ ]+)").find(event)?.groupValues?.get(1)?.let{RelayStatus.record(context,callId,it)}
+        val line="media=webrtc call_control=$callControl call_id=$callId leg_id=$legId role=${if(gateway)"gateway" else "host"} event=$event"
+        Log.i("GsmRtc",line);onLog(line)
+    }
+    private fun fail(reason:String){
+        if(closed.get() || !failed.compareAndSet(false,true))return
+        event("failed reason=$reason");connectionLatch.countDown()
+        // Fail closed even if the app callback itself throws.
+        // Nothing was signaled before start, so a failed preparation leaves
+        // the leg for a fresh session to use.
+        try{onFailure(reason)}finally{close(notifyPeer = started.get())}
+    }
+    fun awaitShutdown(timeoutMillis:Long):Boolean = worker.awaitTermination(timeoutMillis,TimeUnit.MILLISECONDS)
+    override fun close() = close(notifyPeer = true)
+
+    /** Drops local media without signaling: for a preparation that was never
+     * started, whose leg another session or the call's end owns. */
+    fun discard() = close(notifyPeer = false)
+
+    private fun close(notifyPeer:Boolean){
+        if(!closed.compareAndSet(false,true))return
+        connectionLatch.countDown();peer?.close();peer=null;RelayStatus.clear(callId)
+        unusedExpiry?.cancel(false)
+        if(notifyPeer)runCatching{worker.execute {runCatching{send("close")}}}
+        worker.shutdown()
+        event(if(notifyPeer)"closed" else "discarded")
+    }
+}

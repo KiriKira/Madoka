@@ -1,0 +1,166 @@
+package com.callagent.host.contacts
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.database.Cursor
+import android.os.Handler
+import android.os.Looper
+import android.provider.ContactsContract
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+
+/** One locally stored phone number, suitable for a dial candidate or local history label. */
+data class ContactEntry(
+    /** Contacts data-row ID. A contact with several numbers has one entry per number. */
+    val id: Long,
+    val contactId: Long,
+    val name: String,
+    val number: String,
+    val normalizedNumber: String?
+)
+
+/** Reads names and phone numbers from this device's Contacts Provider only. */
+class HostContactsRepository private constructor(
+    private val worker: Executor,
+    private val callbackExecutor: Executor,
+    private val hasReadPermission: () -> Boolean,
+    private val readContacts: (String?) -> List<ContactEntry>
+) {
+    constructor(context: Context) : this(
+        sharedWorker,
+        mainThread,
+        { context.applicationContext.checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED },
+        { query -> queryProvider(context.applicationContext, query) }
+    )
+
+    /** Internal seam keeps permission and executor behavior covered without reading real user contacts. */
+    internal constructor(
+        @Suppress("UNUSED_PARAMETER") context: Context,
+        worker: Executor,
+        callbackExecutor: Executor,
+        hasReadPermission: () -> Boolean,
+        readContacts: (String?) -> List<ContactEntry>
+    ) : this(worker, callbackExecutor, hasReadPermission, readContacts)
+
+    /** Runs the provider query on a worker and delivers its result on the main thread. */
+    fun queryAsync(query: String? = null, callback: (Result<List<ContactEntry>>) -> Unit) {
+        worker.execute {
+            val result = runCatching {
+                if (!hasReadPermission()) emptyList()
+                else try {
+                    readContacts(query)
+                } catch (_: SecurityException) {
+                    // Permission may be revoked between the check and the provider query.
+                    emptyList()
+                }
+            }
+            callbackExecutor.execute { callback(result) }
+        }
+    }
+
+    /**
+     * Reads every contact with a number and files it A to Z on the worker,
+     * then delivers the phone book on the main thread.
+     */
+    fun directoryAsync(callback: (Result<List<ContactPerson>>) -> Unit) {
+        worker.execute {
+            val result = runCatching {
+                if (!hasReadPermission()) emptyList()
+                else try {
+                    ContactDirectory.people(readContacts(null))
+                } catch (_: SecurityException) {
+                    emptyList()
+                }
+            }
+            callbackExecutor.execute { callback(result) }
+        }
+    }
+
+    companion object {
+        /**
+         * Synchronous single-number lookup for notifications. Returns null
+         * without Contacts permission or when the number is unknown.
+         */
+        fun lookupName(context: Context, number: String?): String? {
+            if (number.isNullOrBlank() || number.none(Char::isDigit)) return null
+            val app = context.applicationContext
+            if (app.checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+            return runCatching {
+                val uri = android.net.Uri.withAppendedPath(
+                    ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                    android.net.Uri.encode(number)
+                )
+                app.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)
+                    ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0)?.trim()?.takeIf(String::isNotBlank) else null }
+            }.getOrNull()
+        }
+
+        private val sharedWorker = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "host-local-contacts").apply { isDaemon = true }
+        }
+        private val mainThread: Executor = Executor { command -> Handler(Looper.getMainLooper()).post(command) }
+
+        private fun queryProvider(context: Context, query: String?): List<ContactEntry> {
+            val columns = arrayOf(
+                ContactsContract.CommonDataKinds.Phone._ID,
+                ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER,
+                ContactsContract.CommonDataKinds.Phone.NORMALIZED_NUMBER
+            )
+            val needle = query?.trim()?.takeIf { it.isNotEmpty() }
+            // A number query is matched here, not in SQL: contacts store the
+            // number as typed ("123 4567 8901"), and LIKE '%1234%' cannot see
+            // through the spaces, while NORMALIZED_NUMBER is often missing.
+            // Reading every phone row is cheap next to a dial keystroke.
+            val numberQuery = needle?.any(Char::isDigit) == true
+            val selection = needle?.takeUnless { numberQuery }
+                ?.let { "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?" }
+
+            val entries = context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                columns,
+                selection,
+                selection?.let { arrayOf("%$needle%") },
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} COLLATE LOCALIZED ASC, " +
+                    "${ContactsContract.CommonDataKinds.Phone._ID} ASC"
+            )?.use(::readEntries).orEmpty()
+            return if (numberQuery) entries.filter { matches(it, needle!!) } else entries
+        }
+
+        /** Name substring, or the query's digits anywhere in the number's digits. */
+        internal fun matches(entry: ContactEntry, query: String): Boolean {
+            if (entry.name.contains(query, ignoreCase = true)) return true
+            val digits = query.filter(Char::isDigit)
+            if (digits.isEmpty()) return false
+            return entry.number.filter(Char::isDigit).contains(digits) ||
+                entry.normalizedNumber?.filter(Char::isDigit)?.contains(digits) == true
+        }
+
+        private fun readEntries(cursor: Cursor): List<ContactEntry> {
+            val idColumn = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone._ID)
+            val contactIdColumn = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+            val nameColumn = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val numberColumn = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+            val normalizedColumn = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NORMALIZED_NUMBER)
+            if (idColumn < 0 || contactIdColumn < 0 || nameColumn < 0 || numberColumn < 0) return emptyList()
+
+            val entries = ArrayList<ContactEntry>()
+            while (cursor.moveToNext()) {
+                val name = cursor.getString(nameColumn)?.trim().orEmpty()
+                val number = cursor.getString(numberColumn)?.trim().orEmpty()
+                if (name.isBlank() || number.isBlank()) continue
+                entries += ContactEntry(
+                    id = cursor.getLong(idColumn),
+                    contactId = cursor.getLong(contactIdColumn),
+                    name = name,
+                    number = number,
+                    normalizedNumber = normalizedColumn.takeIf { it >= 0 }
+                        ?.let { cursor.getString(it)?.takeIf(String::isNotBlank) }
+                )
+            }
+            return entries
+        }
+    }
+}

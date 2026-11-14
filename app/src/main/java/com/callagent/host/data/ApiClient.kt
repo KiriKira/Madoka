@@ -1,0 +1,558 @@
+package com.callagent.host.data
+
+import android.net.Uri
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.util.UUID
+
+data class EventPage(
+    val messages: List<SmsRecord>,
+    val nextCursor: String?,
+    val lastItemCursor: String?,
+    val resyncRequired: Boolean
+)
+
+data class PushEndpointStatus(val failures: Int, val deliveredAt: String?)
+
+data class ServerCapabilities(val rtcCallControl: Boolean, val push: Boolean, val extensions: Set<String>)
+
+class ApiFailure(
+    val httpStatus: Int,
+    val code: String,
+    val retryable: Boolean
+) : IOException(if (code.isBlank()) "HTTP $httpStatus" else "$httpStatus $code")
+
+class CallingNotReady : IOException("CALLING_NOT_READY")
+class SessionNeedsPairing : IOException("SESSION_REVOKED")
+class SessionChanged : IOException("SESSION_CHANGED")
+
+class ApiClient(
+    private val configuredBaseUrl: String,
+    private val sessionStore: SessionStore,
+    private val connectTimeoutMillis: Int = 15_000,
+    private val readTimeoutMillis: Int = 20_000
+) {
+    internal val apiRoot: String = normalizeApiBaseUrl(configuredBaseUrl)
+    private val boundSession: HostSession? = sessionStore.read()
+    // Refreshes of one pairing must share an idempotency/token rotation lock,
+    // even when a node switch moves its session between stores. A disconnected
+    // node's HTTP refresh must never hold requests to another pairing.
+    private val refreshKey = "auth:${boundSession?.sessionInstanceId ?: UUID.randomUUID()}"
+
+    fun pair(pairingCode: String, deviceName: String): HostSession {
+        val expectedSession = sessionStore.read()
+        if ((boundSession == null) != (expectedSession == null) ||
+            (boundSession != null && expectedSession != null && !boundSession.sameSessionInstance(expectedSession))) {
+            throw SessionChanged()
+        }
+        val response = publicRequest(
+            "POST", "/pairings/claim",
+            // A join code pairs either phone, so the claim names this one's role.
+            JSONObject().put("pairing_code", pairingCode).put("device_name", clampDeviceName(deviceName))
+                .put("platform", "android").put("role", "client")
+        )
+        val result = sessionFromPairing(response)
+        if (result.role != "client") throw IOException("Pairing code is not for a host client")
+        if (!sessionStore.writeIfCurrent(expectedSession, result)) throw SessionChanged()
+        return result
+    }
+
+    fun revoke() = SessionWorkLocks.withLock(refreshKey) {
+        val session = sessionStore.read() ?: return@withLock
+        val bound = boundSession ?: throw SessionChanged()
+        if (!bound.sameSessionInstance(session) || session.apiBaseUrl != apiRoot) throw SessionChanged()
+        publicRequest("POST", "/auth/revoke", JSONObject().put("refresh_token", session.refreshToken), expectBody = false)
+        if (!sessionStore.clearIfCurrent(session)) throw SessionChanged()
+    }
+
+    fun listGateways(): List<GatewaySnapshot> {
+        val json = authenticatedRequest("GET", "/gateways")
+        val items = json.optJSONArray("items") ?: JSONArray()
+        return (0 until items.length()).mapNotNull { index ->
+            val item = items.optJSONObject(index) ?: return@mapNotNull null
+            val id = item.optNullableString("gateway_id") ?: return@mapNotNull null
+            GatewaySnapshot(
+                gatewayId = id,
+                deviceName = item.optNullableString("device_name") ?: "Gateway",
+                online = item.optBoolean("online", false),
+                lastSeenAt = item.optNullableString("last_seen_at"),
+                mappingRevision = item.optLong("mapping_revision", 0L),
+                root = item.optNullableBoolean("root"),
+                voiceReady = item.optBoolean("rtc_call_control_ready", false),
+                batteryPercent = item.optNullableInt("battery_percent"),
+                charging = item.optNullableBoolean("charging"),
+                installId = item.optNullableString("install_id")?.lowercase()
+            )
+        }
+    }
+
+    /** This node's view of its wake-ups for the device; null when no endpoint is registered. */
+    fun pushStatus(): PushEndpointStatus? {
+        val json = authenticatedRequest("GET", "/devices/self/push-endpoint")
+        if (!json.optBoolean("registered", false)) return null
+        return PushEndpointStatus(json.optInt("failures", 0), json.optString("delivered_at").takeIf { it.isNotBlank() })
+    }
+
+    /** Asks the node for a silent test wake-up now; whether the relay accepted it. */
+    fun testPush(): Boolean = authenticatedRequest("POST", "/devices/self/push-endpoint/test").optBoolean("sent", false)
+
+    fun listPairedHosts(): List<PairedHost> = parsePairedHosts(
+        authenticatedRequest("GET", "/clients")
+    )
+
+    fun listSims(gatewayId: String): Pair<Long, List<SimLine>> {
+        val json = authenticatedRequest("GET", "/gateways/${pathSegment(gatewayId)}/sims")
+        val revision = json.optLong("mapping_revision", 0L)
+        val items = json.optJSONArray("sims") ?: JSONArray()
+        val lines = (0 until items.length()).mapNotNull { index ->
+            val item = items.optJSONObject(index) ?: return@mapNotNull null
+            val simId = item.optNullableString("sim_id") ?: return@mapNotNull null
+            SimLine(
+                simId = simId,
+                slotIndex = item.optInt("slot_index", index),
+                label = item.optNullableString("label") ?: "SIM ${index + 1}",
+                carrierName = item.optNullableString("carrier_name"),
+                phoneNumber = item.optNullableString("phone_number"),
+                state = item.optNullableString("state") ?: "unverified",
+                mappingRevision = item.optLong("mapping_revision", revision),
+                identityVerified = item.optBoolean("identity_verified", false),
+                serviceState = item.optNullableString("service_state"),
+                radio = SimRadio.fromJson(item.optJSONObject("radio"))
+            )
+        }
+        return revision to lines
+    }
+
+    fun listMessages(cursor: String? = null, simId: String? = null, limit: Int = 100): MessagePage {
+        val query = mutableListOf("limit=$limit")
+        cursor?.let { query += "cursor=${Uri.encode(it)}" }
+        simId?.let { query += "sim_id=${Uri.encode(it)}" }
+        val json = authenticatedRequest("GET", "/messages?${query.joinToString("&")}")
+        return MessagePage(
+            items = parseMessageArray(MessageWireValidation.messageItems(json)),
+            nextCursor = json.optNullableString("next_cursor"),
+            resyncRequired = false
+        )
+    }
+
+    fun listEvents(cursor: String?): EventPage {
+        val suffix = cursor?.let { "?cursor=${Uri.encode(it)}&limit=100" } ?: "?limit=100"
+        val json = authenticatedRequest("GET", "/events$suffix")
+        val items = MessageWireValidation.eventItems(json, cursor)
+        val messages = buildList {
+            for (index in 0 until items.length()) {
+                val item = items.getJSONObject(index)
+                val message = item.getJSONObject("message")
+                add(parseMessage(message) ?: throw IOException("Invalid durable message"))
+            }
+        }
+        return EventPage(
+            messages = messages,
+            nextCursor = json.optNullableString("next_cursor"),
+            lastItemCursor = items.optJSONObject(items.length() - 1)?.optNullableString("cursor"),
+            resyncRequired = json.optBoolean("resync_required", false)
+        )
+    }
+
+    fun getMessage(messageId: String): SmsRecord? {
+        val json = authenticatedRequest("GET", "/messages/${pathSegment(messageId)}")
+        return parseMessage(json)
+    }
+
+    /** Call only with ClientDatabase.eventCursor() after its transaction commits. */
+    fun acknowledgeEventCursor(durableCursor: String) {
+        authenticatedRequest("POST", "/events/ack", JSONObject().put("durable_cursor", durableCursor))
+    }
+
+    fun listCalls(): List<RemoteCall> {
+        val items = authenticatedRequest("GET", "/calls").optJSONArray("items") ?: JSONArray()
+        return (0 until items.length()).map { parseCall(items.getJSONObject(it)) }
+    }
+
+    /** Historical pages are separate from the lightweight live-call poll. */
+    fun listCallHistoryPage(cursor: String? = null, limit: Int = 100): Pair<List<RemoteCall>, String?> {
+        require(limit in 1..100) { "Call history page size must be between 1 and 100" }
+        val suffix = cursor?.let { "?limit=$limit&cursor=${Uri.encode(it)}" } ?: "?limit=$limit"
+        val json = authenticatedRequest("GET", "/calls$suffix")
+        val items = json.optJSONArray("items") ?: throw IOException("Invalid call history response")
+        return (0 until items.length()).map { parseCall(items.getJSONObject(it)) } to json.optNullableString("next_cursor")
+    }
+
+    fun getCall(callId: String): RemoteCall = parseCall(authenticatedRequest("GET", "/calls/${pathSegment(callId)}"))
+
+    internal fun rtcRequest(method: String, path: String, body: JSONObject?): JSONObject {
+        require(path.matches(Regex("/(rtc/ice-servers|rtc/legs/[a-zA-Z0-9_-]+|rtc/control/(capability|calls(/[a-zA-Z0-9_-]+(/operations)?)?|incoming)|calls/[a-zA-Z0-9_-]+/media(/active)?)")))
+        return try {
+            if (method == "POST" && path == "/rtc/control/capability" && body?.has("enabled") == true && boundSession != null) {
+                if (sessionStore.read()?.sameSessionInstance(boundSession) != true) throw SessionChanged()
+                val sessionId = boundSession.sessionInstanceId
+                val enabled = body.getBoolean("enabled")
+                RtcCapabilityRefresh.request(sessionId, enabled) {
+                    // Every renewal asks again: one without sleep_seconds ends the grant.
+                    val sleepy = enabled && com.callagent.host.calls.RtcSleep.wanted(sessionId, apiRoot)
+                    val sent = if (!sleepy) authenticatedRequest(method, path, body) else try {
+                        authenticatedRequest(method, path, JSONObject(body.toString())
+                            .put("sleep_seconds", com.callagent.host.calls.RtcSleep.REQUEST_SECONDS))
+                    } catch (failure: ApiFailure) {
+                        // A node rolled back to a version without sleep rejects the field.
+                        if (failure.httpStatus != 400) throw failure
+                        com.callagent.host.calls.RtcSleep.observed(apiRoot, false)
+                        authenticatedRequest(method, path, body)
+                    }
+                    sent.also { com.callagent.host.calls.RtcSleep.answered(sessionId, it, enabled) }
+                }
+            } else authenticatedRequest(method, path, body)
+        }
+        catch (failure: ApiFailure) { throw com.callagent.rtcmedia.MediaApiException(failure.httpStatus, failure.code) }
+        catch (_: java.io.IOException) { throw com.callagent.rtcmedia.MediaApiException(503, "NETWORK_UNAVAILABLE") }
+    }
+
+    internal fun relayCredentials(): JSONObject? {
+        val flags=request("GET","/capabilities",null,token=null,idempotencyKey=null)
+        return if(flags.optBoolean("ice_servers_v1"))rtcRequest("GET","/rtc/ice-servers",null) else null
+    }
+    fun rtcControlAvailable(): Boolean = serverCapabilities().rtcCallControl
+    fun rtcCall(callId: String): RemoteCall = parseCall(rtcRequest("GET", "/rtc/control/calls/${pathSegment(callId)}", null))
+
+    private fun parseCall(json: JSONObject) = RemoteCall(
+        callId = json.getString("call_id"), gatewayId = json.getString("gateway_id"),
+        clientId = json.optNullableString("client_id"), simId = json.getString("sim_id"),
+        mappingRevision = json.getLong("mapping_revision"), direction = json.getString("direction"),
+        state = json.getString("state"), stateRevision = json.getLong("state_revision"),
+        from = json.optNullableString("from"), to = json.optNullableString("to"),
+        createdAt = json.getString("created_at"), expiresAt = json.optNullableString("expires_at"),
+        answeredAt = json.optNullableString("answered_at"),
+        endedAt = json.optNullableString("ended_at"), reason = json.optNullableString("reason")
+    )
+
+    /** Whether this server posts wake-ups to push endpoints; only then is one registered there. */
+    fun pushAvailable(): Boolean =
+        serverCapabilities().push
+
+    /** Store this phone's push endpoint on the server, which tests it first. */
+    fun registerPushEndpoint(endpoint: String) {
+        authenticatedRequest("PUT", "/devices/self/push-endpoint", JSONObject().put("endpoint", endpoint))
+    }
+
+    /** This phone's reception settings on this node (see [com.callagent.host.calls.ReceptionV2]). */
+    fun reception(): com.callagent.host.calls.ReceptionConfig =
+        com.callagent.host.calls.ReceptionConfig.parse(authenticatedRequest("GET", "/devices/self/reception"))
+
+    /** Replaces the settings if they still have [expectedRevision]; a 409 means they changed. */
+    fun putReception(expectedRevision: Long, incoming: Boolean, sms: Boolean): com.callagent.host.calls.ReceptionConfig =
+        com.callagent.host.calls.ReceptionConfig.parse(authenticatedRequest("PUT", "/devices/self/reception",
+            JSONObject().put("version", 2).put("expected_revision", expectedRevision)
+                .put("incoming_enabled", incoming).put("sms_enabled", sms)))
+
+    /** Stop this server posting wake-ups to this phone. */
+    fun deletePushEndpoint() {
+        authenticatedRequest("DELETE", "/devices/self/push-endpoint")
+    }
+
+    /** Public protocol extensions of this server; also a cheap reachability probe. */
+    fun capabilities(): Set<String> = serverCapabilities().extensions
+
+    fun serverCapabilities(): ServerCapabilities {
+        val json = request("GET", "/capabilities", body = null, token = null, idempotencyKey = null)
+        val items = json.optJSONArray("extensions") ?: JSONArray()
+        return ServerCapabilities(json.optBoolean("rtc_call_control", false), json.optBoolean("push", false),
+            (0 until items.length()).mapNotNull { items.optString(it).takeIf(String::isNotBlank) }.toSet())
+            .also {
+                com.callagent.rtcmedia.NodeControlSocket.observed(apiRoot,it.extensions+if(json.optBoolean("ice_servers_v1"))setOf("ice_servers_v1")else emptySet())
+                ServerPushSignal.observed(apiRoot, it.push)
+                com.callagent.host.calls.RtcSleep.observed(apiRoot, json.optBoolean("rtc_sleep", false))
+                com.callagent.host.calls.ReceptionV2.observed(apiRoot, json.optBoolean("reception_v2", false))
+            }
+    }
+
+    fun createMessage(envelope: RetryEnvelope): MessageAccepted {
+        val json = try {
+            authenticatedRequest(
+                "POST", "/messages", idempotencyKey = envelope.idempotencyKey,
+                rawBody = envelope.requestBody()
+            )
+        } catch (failure: ApiFailure) {
+            // This node already holds this phone-minted message under an
+            // earlier idempotency key (a retry that came back to it). Adopt
+            // that record instead of failing a message that exists.
+            val messageId = envelope.messageId
+            if (failure.httpStatus != 409 || failure.code != "MESSAGE_ID_CONFLICT" || messageId == null) throw failure
+            val existing = getMessage(messageId)
+            if (existing == null || existing.direction != "outbound" || existing.simId != envelope.simId ||
+                existing.to != envelope.to || existing.text != envelope.text
+            ) throw failure
+            return MessageAccepted(
+                messageId = messageId,
+                commandId = existing.commandId.orEmpty(),
+                status = existing.status,
+                expiresAt = existing.expiresAt.orEmpty(),
+                partCount = existing.partCount
+            )
+        }
+        return MessageAccepted(
+            messageId = json.getString("message_id"),
+            commandId = json.getString("command_id"),
+            status = json.optString("status", SmsStatus.QUEUED),
+            expiresAt = json.optString("expires_at", ""),
+            partCount = json.optNullableInt("part_count")
+        )
+    }
+
+    private fun authenticatedRequest(
+        method: String,
+        path: String,
+        body: JSONObject? = null,
+        idempotencyKey: String? = null,
+        rawBody: String? = null
+    ): JSONObject {
+        RequestBudget.current?.remainingMillis()
+        refreshIfExpiring()
+        val first = currentBoundSession()
+        try {
+            return request(method, path, body, first.accessToken, idempotencyKey, rawBody = rawBody)
+        } catch (failure: ApiFailure) {
+            if (failure.httpStatus != 401) throw failure
+            refreshSession(expected = first)
+            val second = currentBoundSession()
+            return request(method, path, body, second.accessToken, idempotencyKey, rawBody = rawBody)
+        }
+    }
+
+    private fun refreshIfExpiring() {
+        SessionWorkLocks.withLock(refreshKey) {
+            RequestBudget.current?.remainingMillis()
+            val current = currentBoundSession()
+            val expires = parseInstant(current.accessExpiresAt)
+            if (expires != null && expires.isAfter(Instant.now().plusSeconds(45))) return@withLock
+            refreshSessionLocked(current)
+        }
+    }
+
+    private fun refreshSession(expected: HostSession) {
+        SessionWorkLocks.withLock(refreshKey) {
+            RequestBudget.current?.remainingMillis()
+            val current = currentBoundSession()
+            if (!current.sameSessionInstance(expected)) throw SessionChanged()
+            if (current.accessToken != expected.accessToken) return@withLock
+            refreshSessionLocked(current)
+        }
+    }
+
+    private fun refreshSessionLocked(current: HostSession) {
+        val pending = sessionStore.beginRefresh(current) ?: throw SessionChanged()
+        val key = pending.pendingRefreshKey ?: throw IOException("Could not persist refresh retry key")
+        val json = try {
+            publicRequest("POST", "/auth/refresh", JSONObject().put("refresh_token", pending.refreshToken), idempotencyKey = key)
+        } catch (failure: ApiFailure) {
+            if (failure.httpStatus != 401) throw failure
+            if (sessionStore.clearIfCurrent(pending)) throw SessionNeedsPairing()
+            throw SessionChanged()
+        }
+        val updated = sessionStore.updateTokens(
+                expected = pending,
+                access = json.getString("access_token"),
+                accessExpiry = json.getString("access_expires_at"),
+                refresh = json.getString("refresh_token"),
+                refreshExpiry = json.getString("refresh_expires_at")
+            ) ?: throw SessionChanged()
+        if (parseInstant(updated.refreshExpiresAt)?.isBefore(Instant.now()) == true) {
+            if (sessionStore.clearIfCurrent(updated)) throw SessionNeedsPairing()
+            throw SessionChanged()
+        }
+    }
+
+    private fun publicRequest(
+        method: String,
+        path: String,
+        body: JSONObject,
+        expectBody: Boolean = true,
+        idempotencyKey: String? = null
+    ): JSONObject = request(method, path, body, token = null, idempotencyKey = idempotencyKey, expectBody = expectBody)
+
+    private fun request(
+        method: String,
+        path: String,
+        body: JSONObject?,
+        token: String?,
+        idempotencyKey: String?,
+        expectBody: Boolean = true,
+        rawBody: String? = null
+    ): JSONObject {
+        val budget = RequestBudget.current
+        val remaining = budget?.remainingMillis()?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt()
+        val socketToken=token?:if(path=="/auth/refresh")sessionStore.read()?.accessToken else null
+        if(socketToken!=null)try{
+            com.callagent.rtcmedia.NodeControlSocket.request(apiRoot,socketToken,method,path,body?:rawBody?.let{JSONObject(it)},remaining?.toLong()?:6000L,idempotencyKey)?.let{return it}
+        }catch(failure:com.callagent.rtcmedia.MediaApiException){throw ApiFailure(failure.status,failure.code,failure.status>=500||failure.status==429)}
+        val requestStarted = System.nanoTime()
+        var requestSucceeded = false
+        var sentBytes = 0L
+        var receivedBytes = 0L
+        val connection = (URL(apiRoot + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = remaining?.let { minOf(connectTimeoutMillis, it) } ?: connectTimeoutMillis
+            readTimeout = remaining?.let { minOf(readTimeoutMillis, it) } ?: readTimeoutMillis
+            instanceFollowRedirects = false
+            useCaches = false
+            setRequestProperty("Accept", "application/json")
+            token?.let { setRequestProperty("Authorization", "Bearer $it") }
+            idempotencyKey?.let { setRequestProperty("Idempotency-Key", it) }
+            if (body != null || rawBody != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+        }
+        try {
+            budget?.attach(connection)
+            if (body != null || rawBody != null) connection.outputStream.use { output ->
+                val bytes = (rawBody ?: body!!.toString()).toByteArray(Charsets.UTF_8)
+                output.write(bytes)
+                sentBytes = bytes.size.toLong()
+            }
+            val status = connection.responseCode
+            if(status==429)com.callagent.rtcmedia.NodeControlSocket.rateLimited(apiRoot,connection.getHeaderField("Retry-After")?.toLongOrNull()?:60L)
+            if (status in 300..399) throw IOException("Server endpoint redirected; check the configured server URL")
+            if (status !in 200..299) {
+                val errorBody = runCatching { connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } }.getOrNull()
+                receivedBytes = errorBody?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0L
+                val code = runCatching {
+                    JSONObject(errorBody ?: "{}").optJSONObject("error")?.optString("code").orEmpty()
+                }.getOrDefault("")
+                val retryable = runCatching {
+                    JSONObject(errorBody ?: "{}").optJSONObject("error")?.optBoolean("retryable", false) ?: false
+                }.getOrDefault(false)
+                throw ApiFailure(status, code, retryable)
+            }
+            budget?.remainingMillis()
+            if (!expectBody || status == HttpURLConnection.HTTP_NO_CONTENT) {
+                requestSucceeded = true
+                return JSONObject()
+            }
+            val text = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            receivedBytes = text.toByteArray(Charsets.UTF_8).size.toLong()
+            budget?.remainingMillis()
+            requestSucceeded = true
+            return if (text.isBlank()) JSONObject() else JSONObject(text)
+        } finally {
+            StandbyDiagnostics.record(method, path, requestSucceeded, System.nanoTime() - requestStarted, sentBytes, receivedBytes, apiRoot)
+            budget?.detach(connection)
+            connection.disconnect()
+        }
+    }
+
+    private fun sessionFromPairing(json: JSONObject): HostSession {
+        return HostSession(
+            sessionInstanceId = UUID.randomUUID().toString(),
+            apiBaseUrl = apiRoot,
+            ownerId = json.getString("owner_id"),
+            deviceId = json.getString("device_id"),
+            role = json.getString("role"),
+            accessToken = json.getString("access_token"),
+            accessExpiresAt = json.getString("access_expires_at"),
+            refreshToken = json.getString("refresh_token"),
+            refreshExpiresAt = json.getString("refresh_expires_at")
+        )
+    }
+
+    private fun parseMessageArray(array: JSONArray?): List<SmsRecord> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).mapNotNull { parseMessage(array.optJSONObject(it)) }
+    }
+
+    private fun parseMessage(json: JSONObject?): SmsRecord? {
+        if (json == null) return null
+        val serverId = json.optNullableString("message_id") ?: return null
+        val parts = parseSmsParts(json.optJSONArray("parts"))
+        return SmsRecord(
+            localId = "remote:$serverId",
+            serverId = serverId,
+            commandId = json.optNullableString("command_id"),
+            simId = json.optNullableString("sim_id"),
+            mappingRevision = json.optNullableLong("mapping_revision"),
+            direction = json.optString("direction", "inbound"),
+            from = json.optNullableString("from"),
+            to = json.optNullableString("to"),
+            text = json.optString("text", ""),
+            status = json.optString("status", SmsStatus.UNKNOWN),
+            createdAt = json.optNullableString("created_at") ?: Instant.now().toString(),
+            expiresAt = json.optNullableString("expires_at"),
+            partCount = json.optNullableInt("part_count"),
+            parts = parts,
+            taskKey = null,
+            gatewayId = json.optNullableString("gateway_id"),
+            idempotencyBody = null
+        )
+    }
+
+    private fun pathSegment(value: String): String = Uri.encode(value)
+
+    private fun parseInstant(value: String): Instant? = runCatching {
+        runCatching { Instant.parse(value) }.getOrElse { OffsetDateTime.parse(value).toInstant() }
+    }.getOrNull()
+
+    private fun currentBoundSession(): HostSession {
+        val current = sessionStore.read() ?: throw SessionNeedsPairing()
+        val bound = boundSession ?: throw SessionChanged()
+        if (!bound.sameSessionInstance(current)) throw SessionChanged()
+        if (current.apiBaseUrl != apiRoot) throw SessionChanged()
+        return current
+    }
+
+}
+
+internal fun normalizeApiBaseUrl(value: String): String {
+    val uri = runCatching { java.net.URI(value.trim()) }.getOrElse { throw IOException("Enter a valid http:// or https:// server URL") }
+    val scheme = uri.scheme?.lowercase()
+    // HTTPS is recommended; plain HTTP is accepted for self-hosted LAN/VPN nodes.
+    if ((scheme != "https" && scheme != "http") || uri.host.isNullOrBlank() || uri.userInfo != null || uri.query != null || uri.fragment != null) {
+        throw IOException("Server URL must use http:// or https:// and contain no credentials or query")
+    }
+    val path = uri.rawPath.orEmpty().trimEnd('/')
+    val originAndPath = "$scheme://${uri.rawAuthority}$path"
+    return if (path.endsWith("/v1")) originAndPath else "$originAndPath/v1"
+}
+
+internal fun parsePairedHosts(json: JSONObject): List<PairedHost> {
+    val items = json.optJSONArray("items") ?: JSONArray()
+    return (0 until items.length()).mapNotNull { index ->
+        val item = items.optJSONObject(index) ?: return@mapNotNull null
+        val id = item.optNullableString("id") ?: return@mapNotNull null
+        PairedHost(
+            id = id,
+            name = item.optNullableString("name") ?: id.take(8),
+            platform = item.optNullableString("platform") ?: "unknown",
+            state = item.optNullableString("state") ?: "unknown",
+            isSelf = item.optBoolean("is_self", false),
+            live = if (item.has("live")) item.optBoolean("live") else null,
+            lastActiveAt = item.optNullableString("last_active_at")?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrNull() }
+        )
+    }
+}
+
+private fun JSONObject.optNullableString(name: String): String? {
+    if (!has(name) || isNull(name)) return null
+    return optString(name).takeIf { it.isNotBlank() && it != "null" }
+}
+
+private fun JSONObject.optNullableLong(name: String): Long? =
+    if (!has(name) || isNull(name)) null else optLong(name)
+
+private fun JSONObject.optNullableInt(name: String): Int? =
+    if (!has(name) || isNull(name)) null else optInt(name)
+
+private fun JSONObject.optNullableBoolean(name: String): Boolean? =
+    if (!has(name) || isNull(name)) null else optBoolean(name)
+
+data class MessagePage(val items: List<SmsRecord>, val nextCursor: String?, val resyncRequired: Boolean)
+
+/** The server allows 100 characters (code points) for a device name. */
+internal fun clampDeviceName(name: String): String {
+    val trimmed = name.trim()
+    return if (trimmed.codePointCount(0, trimmed.length) <= 100) trimmed
+    else trimmed.substring(0, trimmed.offsetByCodePoints(0, 100))
+}

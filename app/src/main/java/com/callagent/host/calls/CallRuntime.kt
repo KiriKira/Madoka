@@ -1,0 +1,455 @@
+package com.callagent.host.calls
+
+import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import com.callagent.host.data.HostSession
+import com.callagent.host.data.profileKey
+import com.callagent.host.data.SessionStore
+
+/** Process-wide call owner. Activities render its snapshots; no Activity owns a call. */
+object CallRuntime {
+    const val ACTION_STATE_CHANGED = "com.callagent.host.calls.STATE_CHANGED"
+    internal const val EXTRA_CHANGED_CALL_ID = "com.callagent.host.calls.CHANGED_CALL_ID"
+    internal val coordinator = CallSessionCoordinator()
+
+    @Volatile
+    private var service: HostCallService? = null
+
+    /** Set by whichever component has a context, so a late state change still reaches a visible screen. */
+    @Volatile
+    private var appContext: Context? = null
+
+    @Volatile
+    private var appVisible = false
+
+    @Volatile
+    private var wantsForegroundListening = false
+
+    @Volatile
+    private var rememberedSessionInstance: String? = null
+
+    @Volatile
+    private var rememberedProfileKey: String? = null
+
+    private val signalingStartLock = Any()
+
+    @Volatile
+    private var signalingStartRequestedFor: String? = null
+
+    @Volatile
+    private var statusText: String = ""
+
+    val currentCallId: String? get() = coordinator.current?.callId?.takeUnless { it == "pending" }
+    val currentSession: CallSession? get() = coordinator.current
+    val currentStatus: String get() = statusText
+    val isForegroundListening: Boolean get() = service?.isForegroundListening == true
+    val isSignalingReady: Boolean get() = service?.isSignalingReady == true
+    val isListeningRequested: Boolean get() = wantsForegroundListening
+    /** A Madoka activity is on screen, so it may start the call screen itself. */
+    internal val isAppVisible: Boolean get() = appVisible
+
+    fun restoreForegroundPreference(context: Context, session: HostSession?) {
+        adoptContext(context)
+        val nextSessionInstance = session?.sessionInstanceId
+        val previousSessionInstance = rememberedSessionInstance
+        if (previousSessionInstance != null && previousSessionInstance != nextSessionInstance) {
+            wantsForegroundListening = false
+            signalingStartRequestedFor = null
+            // Another node of the same profile keeps the user's opt-in; only
+            // its call control (per server) is restarted.
+            if (rememberedProfileKey != session?.profileKey) CallPreferences(context).clear()
+            service?.stopForSessionChange()
+        }
+        wantsForegroundListening = CallPreferences(context).enabledFor(session)
+        rememberedSessionInstance = nextSessionInstance
+        rememberedProfileKey = session?.profileKey
+    }
+
+    /** The phone switched to another server node of the same profile. */
+    fun onActiveNodeChanged(context: Context, session: HostSession) {
+        val app = context.applicationContext
+        restoreForegroundPreference(app, session)
+        // Start call control on the new node right away. In the
+        // background Android may refuse the service start; the next app
+        // open then restarts signaling as usual.
+        if (wantsForegroundListening) runCatching { startSignalingIfNeeded(app, session) }
+    }
+
+    fun snapshot(callId: String): CallSession? = coordinator.current?.takeIf { it.callId == callId }
+
+    fun clearTerminal(callId: String) {
+        if (coordinator.clearTerminal(callId)) notifyChanged(callId)
+    }
+
+    internal fun updateEndedNotice(callId: String, notice: String) {
+        synchronized(coordinator) {
+            if (!coordinator.updateEndedNotice(callId, notice)) return
+            statusText = notice
+            notifyChanged(callId)
+        }
+    }
+
+    fun startOutbound(
+        context: Activity,
+        gatewayId: String,
+        simId: String,
+        simLabel: String,
+        mappingRevision: Long,
+        destination: String
+    ): Boolean {
+        if (context.isFinishing || context.isDestroyed) return false
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
+        if (!coordinator.beginOutbound(simId, destination)) return false
+        statusText = "正在检查远程 SIM 和语音服务…"
+        notifyChanged("pending")
+        val accepted = HostCallService.startOutbound(
+            context.applicationContext,
+            gatewayId = gatewayId,
+            simId = simId,
+            simLabel = simLabel,
+            mappingRevision = mappingRevision,
+            destination = destination
+        )
+        if (!accepted) {
+            coordinator.failed("pending", "Could not start the call service")
+            statusText = "Android 未允许启动通话服务。"
+            notifyChanged("pending")
+        }
+        return accepted
+    }
+
+    fun enableForegroundListening(activity: Activity): Boolean {
+        val session = runCatching { SessionStore(activity.applicationContext).read() }.getOrNull()
+        if (session != null) CallPreferences(activity).setUserChoice(session, true)
+        return ensureIncomingCallSignalingForPairedSession(activity)
+    }
+
+    /** Starts only call signaling from a visible pairing screen; audio permissions remain call-scoped. */
+    fun ensureIncomingCallSignalingForPairedSession(
+        activity: Activity,
+        availabilityOverride: Boolean? = null
+    ): Boolean {
+        if (!isVisibleAndFocused(activity)) return false
+        val context = activity.applicationContext
+        val session = runCatching { SessionStore(context).read() }.getOrNull() ?: return false
+        val preferences = CallPreferences(context)
+        if (!preferences.canAutoListenFor(session, availabilityOverride ?: true)) return false
+
+        synchronized(signalingStartLock) {
+            if (!isVisibleAndFocused(activity)) return false
+            if (rememberedSessionInstance != session.sessionInstanceId) {
+                restoreForegroundPreference(context, session)
+            }
+            if (!preferences.ensureEnabledFor(session)) return false
+            wantsForegroundListening = true
+            rememberedSessionInstance = session.sessionInstanceId
+
+            if (service?.isForegroundListening == true) {
+                signalingStartRequestedFor = null
+                return true
+            }
+            if (signalingStartRequestedFor == session.sessionInstanceId) return true
+
+            statusText = "正在启动后台来电接收…"
+            notifyChanged(currentCallId)
+            signalingStartRequestedFor = session.sessionInstanceId
+            val started = if (service != null) {
+                service?.setForegroundListening(true)
+                true
+            } else {
+                HostCallService.setForegroundListening(context, true)
+            }
+            if (!started) {
+                signalingStartRequestedFor = null
+                wantsForegroundListening = false
+                preferences.setEnabled(session, false)
+            }
+            return started
+        }
+    }
+
+    /** [byUser]: the user turned it off, and opening the app keeps it off. */
+    fun disableForegroundListening(context: Context, byUser: Boolean = false) {
+        val session = SessionStore(context.applicationContext).read()
+        if (byUser) CallPreferences(context).setUserChoice(session, false)
+        else CallPreferences(context).setEnabled(session, false)
+        wantsForegroundListening = false
+        signalingStartRequestedFor = null
+        if (service != null) service?.setForegroundListening(false)
+        else HostCallService.setForegroundListening(context.applicationContext, false)
+        statusText = "前台来电接收已关闭。"
+        notifyChanged(currentCallId)
+    }
+
+    fun setAppVisible(context: Context, visible: Boolean) {
+        appVisible = visible
+        if (visible && wantsForegroundListening) {
+            val session = runCatching { SessionStore(context.applicationContext).read() }.getOrNull()
+            if (session != null && CallPreferences(context).enabledFor(session)) {
+                startSignalingIfNeeded(context.applicationContext, session)
+            }
+        }
+    }
+
+    fun answerFromVisibleUser(context: Context, callId: String): Boolean {
+        com.callagent.host.data.HostRunLog.add("UI","answer tapped call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
+        val host = service ?: return false
+        if (!coordinator.answer(callId)) {
+            expireIncomingAnswerIfNeeded(host, callId)
+            return false
+        }
+        statusText = "正在建立加密语音…"
+        notifyChanged(callId)
+        host.answerAfterForeground(callId)
+        return true
+    }
+
+    internal fun onTelecomAnswer(callId: String) {
+        com.callagent.host.data.HostRunLog.add("UI","answer from system call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
+        val app = service ?: return
+        if (app.applicationContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            rejectFromService(callId, "Microphone permission is not granted")
+            return
+        }
+        if (!coordinator.answer(callId)) {
+            expireIncomingAnswerIfNeeded(app, callId)
+            return
+        }
+        statusText = "正在建立加密语音…"
+        notifyChanged(callId)
+        app.answerAfterForeground(callId)
+    }
+
+    private fun expireIncomingAnswerIfNeeded(host: HostCallService, callId: String) {
+        val call = snapshot(callId) ?: return
+        if (call.direction == CallDirection.INCOMING && call.phase == CallPhase.INCOMING_RINGING &&
+            call.expiresAtEpochMillis <= System.currentTimeMillis()
+        ) {
+            host.rejectCall(callId, "来电已超时。")
+        }
+    }
+
+    fun rejectFromUi(context: Context, callId: String) = reject(callId, context)
+
+    fun rejectFromNotification(context: Context, callId: String) = reject(callId, context)
+
+    private fun reject(callId: String, context: Context) {
+        com.callagent.host.data.HostRunLog.add("UI","decline tapped call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
+        val call = snapshot(callId) ?: return
+        if (call.phase != CallPhase.INCOMING_RINGING) return
+        if (!coordinator.disconnect(callId)) return
+        statusText = "正在拒接…"
+        notifyChanged(callId)
+        service?.rejectCall(callId) ?: HostCallService.rejectFromNotification(context, callId)
+    }
+
+    fun hangupFromUi(context: Context, callId: String) = hangup(callId, context)
+
+    fun hangupFromNotification(context: Context, callId: String) = hangup(callId, context)
+
+    private fun hangup(callId: String, context: Context) {
+        val call = snapshot(callId) ?: return
+        if (call.phase in setOf(CallPhase.ENDED, CallPhase.FAILED, CallPhase.DISCONNECTING)) return
+        if (!coordinator.disconnect(callId)) return
+        statusText = "正在结束通话…"
+        notifyChanged(callId)
+        service?.hangupCall(callId) ?: HostCallService.hangupFromNotification(context, callId)
+    }
+
+    fun setMuted(context: Context, callId: String, muted: Boolean) {
+        if (!coordinator.setMuted(callId, muted)) return
+        service?.setMuted(callId, muted)
+        notifyChanged(callId)
+    }
+
+    fun toggleSpeaker(context: Context, callId: String, enabled: Boolean) {
+        val endpoint = if (enabled) CallAudioEndpoint.SPEAKER else CallAudioEndpoint.EARPIECE
+        selectAudioEndpoint(context, callId, endpoint)
+    }
+
+    fun audioEndpoints(callId: String): List<CallAudioEndpoint> = CallTelecomController.audioEndpoints(callId)
+
+    fun selectedAudioEndpoint(callId: String): CallAudioEndpoint? = CallTelecomController.currentAudioEndpoint(callId)
+
+    fun selectAudioEndpoint(context: Context, callId: String, endpoint: CallAudioEndpoint) {
+        if (CallTelecomController.selectAudioEndpoint(callId, endpoint)) return
+        // No Telecom connection to route through: switch the speaker directly,
+        // so the button never silently does nothing.
+        if (endpoint != CallAudioEndpoint.SPEAKER && endpoint != CallAudioEndpoint.EARPIECE) return
+        val audio = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        val speaker = endpoint == CallAudioEndpoint.SPEAKER
+        runCatching {
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                if (speaker) audio.availableCommunicationDevices
+                    .firstOrNull { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    ?.let(audio::setCommunicationDevice)
+                else audio.clearCommunicationDevice()
+            } else {
+                @Suppress("DEPRECATION")
+                audio.isSpeakerphoneOn = speaker
+            }
+        }
+        onTelecomAudioRoute(callId, endpoint)
+    }
+
+    fun sendDtmf(context: Context, callId: String, digits: String) {
+        val normalized = digits.filter { it in "0123456789*#ABCDabcd" }.uppercase().take(32)
+        if (normalized.isNotEmpty()) service?.sendDtmf(callId, normalized)
+    }
+
+    internal fun onTelecomReject(callId: String) {
+        val host = service ?: return
+        reject(callId, host.applicationContext)
+    }
+
+    internal fun onTelecomDisconnect(callId: String) {
+        val host = service ?: return
+        hangup(callId, host.applicationContext)
+    }
+
+    internal fun onTelecomHold(callId: String, hold: Boolean) = Unit
+
+    internal fun onTelecomAudioRoute(callId: String, endpoint: CallAudioEndpoint?) {
+        coordinator.setSpeaker(callId, endpoint == CallAudioEndpoint.SPEAKER)
+        notifyChanged(callId)
+    }
+
+    internal fun onTelecomMute(callId: String, muted: Boolean) {
+        if (coordinator.setMuted(callId, muted)) service?.setMuted(callId, muted)
+    }
+
+    internal fun onTelecomDtmf(callId: String, digit: Char) = service?.sendDtmf(callId, digit.toString())
+
+    internal fun onTelecomConnectionCreated(callId: String) {
+        notifyChanged(callId)
+    }
+
+    internal fun onForegroundReady(callId: String, microphone: Boolean) {
+        service?.onForegroundReady(callId, microphone)
+    }
+
+    internal fun onForegroundStartFailed(callId: String, microphone: Boolean) {
+        service?.failCall(callId, if (microphone) "Android blocked microphone access for this call" else "Android blocked the call notification service")
+    }
+
+    /**
+     * Call control could not start this time: a node that is down, no
+     * network, Android refusing the service. The user's choice to receive
+     * calls stays as it is. Writing it off here used to reach every node
+     * through reception v2, which then withdrew this phone from calls still
+     * ringing on healthy nodes. The next push, network change, node switch or
+     * app open tries again.
+     */
+    internal fun onListeningFailed(context: Context, message: String) {
+        // The message is a fixed user-facing string; no address, token or number.
+        android.util.Log.w("HostCall", "Call control could not start; reception stays on: $message")
+        com.callagent.host.data.StandbyDiagnostics.event("call_control_start_failed")
+        signalingStartRequestedFor = null
+        statusText = message
+        notifyChanged(currentCallId)
+    }
+
+    internal fun onTelecomIncomingFailed(callId: String) {
+        service?.failCall(callId, "Telecom could not add the incoming call")
+    }
+
+    internal fun onTelecomOutgoingFailed(callId: String) {
+        service?.failCall(callId, "Telecom could not place the call")
+    }
+
+    internal fun attach(hostCallService: HostCallService) {
+        service = hostCallService
+        adoptContext(hostCallService)
+    }
+
+    /** A visible screen or the service hands its context over so late updates still reach the UI. */
+    internal fun adoptContext(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    /** Wake an already-owned call service without starting signaling or another foreground service. */
+    /** The background service's WebSocket to the active node is open, so wake hints arrive. */
+    @Volatile internal var wakeChannelLive = false
+
+    internal val hasServiceForPush: Boolean get() = service != null
+
+    /** An FCM wake-up: start call control if Android stopped it, else poll now. */
+    internal fun wakeFromPush(context: Context): Boolean {
+        val app = context.applicationContext
+        service?.takeUnless { it.stoppingUntilInvited }?.let { if (it.requestCallSyncFromWakeHint()) return true }
+        signalingStartRequestedFor = null
+        val session = runCatching { SessionStore(app).read() }.getOrNull() ?: return false
+        restoreForegroundPreference(app, session)
+        return runCatching { startSignalingIfNeeded(app, session) }.getOrDefault(false)
+    }
+
+    /** Whether a call service took the wake; false when none is running to poll. */
+    internal fun requestCallSyncFromWakeHint(): Boolean =
+        service?.requestCallSyncFromWakeHint() == true
+
+    internal fun detach(hostCallService: HostCallService) {
+        if (service === hostCallService) {
+            service = null
+            signalingStartRequestedFor = null
+        }
+    }
+
+    private fun startSignalingIfNeeded(context: Context, session: HostSession): Boolean = synchronized(signalingStartLock) {
+        if (!wantsForegroundListening || CallPreferences(context).enabledFor(session).not()) return@synchronized false
+        if (service?.isForegroundListening == true) {
+            signalingStartRequestedFor = null
+            return@synchronized true
+        }
+        if (signalingStartRequestedFor == session.sessionInstanceId) return@synchronized true
+        signalingStartRequestedFor = session.sessionInstanceId
+        val running = service?.takeUnless { it.stoppingUntilInvited }
+        val started = if (running != null) {
+            running.setForegroundListening(true)
+            true
+        } else {
+            HostCallService.setForegroundListening(context, true)
+        }
+        if (!started) signalingStartRequestedFor = null
+        started
+    }
+
+    private fun isVisibleAndFocused(activity: Activity): Boolean =
+        !activity.isFinishing && !activity.isDestroyed && activity.hasWindowFocus()
+
+    internal fun publishCall(call: CallSession, text: String? = null) {
+        statusText = text.orEmpty()
+        if (!text.isNullOrBlank()) com.callagent.host.data.HostRunLog.status(text)
+        notifyChanged(call.callId)
+    }
+
+    internal fun setStatus(text: String, callId: String? = currentCallId) {
+        statusText = text
+        if (text.isNotBlank()) com.callagent.host.data.HostRunLog.status(text)
+        notifyChanged(callId)
+    }
+
+    internal fun notifyChanged(callId: String?) {
+        val host = service?.applicationContext ?: appContext ?: return
+        IncomingRinger.sync(host, coordinator.current)
+        ProximityScreenLock.sync(host, coordinator.current)
+        host.sendBroadcast(
+            Intent(ACTION_STATE_CHANGED)
+                .setPackage(host.packageName)
+                .putExtra(EXTRA_CHANGED_CALL_ID, callId)
+        )
+    }
+
+    internal fun rejectFromService(callId: String, reason: String) {
+        service?.rejectCall(callId, reason)
+    }
+
+    internal fun startMicrophoneForeground(context: Context, callId: String): Boolean =
+        CallForegroundService.start(context, callId, microphone = true)
+
+    internal fun currentSessionForService(): CallSession? = coordinator.current
+
+}

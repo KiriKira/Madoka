@@ -1,0 +1,87 @@
+name: Repackage existing Android UI evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Existing Android KVM UI smoke run ID
+        required: true
+        type: string
+      artifact_name:
+        description: UI smoke artifact name (legacy runs use gsm2sip-host-android-ui-smoke)
+        required: false
+        type: string
+        default: Madoka-android-ui-smoke
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  repackage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+          name: ${{ github.event_name == 'push' && 'gsm2sip-host-android-ui-smoke' || (inputs.artifact_name || 'Madoka-android-ui-smoke') }}
+          path: recovered
+
+      - name: Stage branded recovered APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f recovered/artifacts/android-ui-smoke/Madoka-debug.apk ]]; then
+            cp recovered/artifacts/android-ui-smoke/Madoka-debug.apk Madoka-debug.apk
+          elif [[ -f recovered/app/build/outputs/apk/debug/app-debug.apk ]]; then
+            cp recovered/app/build/outputs/apk/debug/app-debug.apk Madoka-debug.apk
+          else
+            echo "No recovered Madoka APK found" >&2
+            exit 1
+          fi
+
+      - name: Print paired launch crash diagnostics
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          for file in Path('recovered').rglob('logcat.txt'):
+              lines = file.read_text(errors='replace').splitlines()
+              indices = [i for i, line in enumerate(lines) if 'FATAL EXCEPTION' in line]
+              for i in indices:
+                  print(f'{file}: crash trace')
+                  print('\n'.join(lines[max(0, i - 2):i + 55]))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Madoka-ui-diagnostics
+          path: |
+            recovered/artifacts/android-ui-smoke/**/*.txt
+            recovered/artifacts/android-ui-smoke/**/*.xml
+            recovered/artifacts/android-ui-smoke/**/*.json
+            recovered/artifacts/android-ui-smoke/**/*.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Madoka-ui-key-screenshots
+          path: |
+            recovered/artifacts/android-ui-smoke/*.png
+            recovered/artifacts/android-ui-smoke/paired-fixture/paired*.png
+            recovered/artifacts/android-ui-smoke/paired-fixture/sms*.png
+            recovered/artifacts/android-ui-smoke/paired-fixture/background_receive_settings.png
+            recovered/artifacts/android-ui-smoke/paired-fixture/call_panel_unavailable.png
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Madoka-runtime-apk
+          path: Madoka-debug.apk
+          if-no-files-found: error
+          retention-days: 14
