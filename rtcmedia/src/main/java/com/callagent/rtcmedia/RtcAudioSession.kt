@@ -115,10 +115,7 @@ class RtcAudioSession(
                 if(peerSlot.isClosed)return@execute
                 val native=NativePeer(context,callId,servers,pcm,::event,onDigit,
                     { reason -> runCatching { worker.execute { fail(reason) } }; Unit },
-                    forceRelay,relaySelection::sourcesForUrl,relaySelection.hasAdditionalSources,
-                    onGatheringComplete={ count ->
-                        if(!peerSlot.isClosed)relayDiagnostics.completed(forceRelay,count)?.let(::event)
-                    })
+                    forceRelay,relaySelection::sourcesForUrl,relaySelection.hasAdditionalSources)
                 if(!peerSlot.install(native))return@execute
                 native.mute(desiredMute);native.enableAudio(desiredAudio)
                 event("native_ready elapsed_ms=${TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-preparedAt)}")
@@ -277,13 +274,16 @@ class RtcAudioSession(
         val line="media=webrtc call_control=$callControl call_id=$callId leg_id=$legId role=${if(gateway)"gateway" else "host"} event=$event"
         Log.i("GsmRtc",line);onLog(line)
     }
+    /** Explains a failed forced-relay call that never produced a local candidate.
+     * Reported on failure only: during setup, TURN candidates may still be arriving. */
+    private fun relayDiagnosis(){runCatching{peer?.let{relayDiagnostics.completed(forceRelay,it.gatheredCandidates)}?.let(::event)}}
     private fun fail(reason:String){
         if(peerSlot.isClosed || !failed.compareAndSet(false,true))return
         connectionLatch.countDown()
         // Fail closed even if a logging or app callback itself throws.
         // Nothing was signaled before start, so a failed preparation leaves
         // the leg for a fresh session to use.
-        try{event("failed reason=$reason");onFailure(reason)}finally{close(notifyPeer = started.get())}
+        try{event("failed reason=$reason");relayDiagnosis();onFailure(reason)}finally{close(notifyPeer = started.get())}
     }
     fun awaitShutdown(timeoutMillis:Long):Boolean = worker.awaitTermination(timeoutMillis,TimeUnit.MILLISECONDS)
     // A ringing preparation has not signaled and must not close the shared leg.
