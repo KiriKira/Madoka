@@ -304,8 +304,8 @@ internal class RtcCallEngine(
         if(state==EngineCallState.INCOMING)prefetchRelays(id)
         if(state in TERMINAL)relayPrefetches.remove(id)?.cancel(true)
         updateContinuousLease()
-        Log.i("GsmRtc","media=webrtc call_control=rtc call_id=$id event=control_${state.name.lowercase()}")
-        com.callagent.host.data.HostRunLog.add("RTC","call=${id.take(8)} control_${state.name.lowercase()}"+
+        Log.i("GsmRtc","media=webrtc call_control=rtc call_id=$id event=control_${state.name.lowercase()}"+(if(snapshot.optBoolean("test"))" test_call=true" else ""))
+        com.callagent.host.data.HostRunLog.add("RTC","call=${id.take(8)} control_${state.name.lowercase()}"+(if(snapshot.optBoolean("test"))" test_call=true" else "")+
             (snapshot.optString("reason").takeIf{it.isNotBlank()}?.let{" reason=$it"}?:""))
         listener.onCallState(EngineCallSnapshot(id,direction(snapshot),state,serverCallId=id,
             terminalReason=snapshot.optString("reason").takeIf{it.isNotBlank()}))

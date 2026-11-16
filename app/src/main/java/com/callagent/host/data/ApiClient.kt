@@ -186,7 +186,7 @@ class ApiClient(
     fun getCall(callId: String): RemoteCall = parseCall(authenticatedRequest("GET", "/calls/${pathSegment(callId)}"))
 
     internal fun rtcRequest(method: String, path: String, body: JSONObject?): JSONObject {
-        require(path.matches(Regex("/(rtc/ice-servers|rtc/legs/[a-zA-Z0-9_-]+|rtc/control/(capability|calls(/[a-zA-Z0-9_-]+(/operations)?)?|incoming)|calls/[a-zA-Z0-9_-]+/media(/active)?)")))
+        require(path.matches(Regex("/(rtc/ice-servers|rtc/control/test-calls|rtc/legs/[a-zA-Z0-9_-]+|rtc/control/(capability|calls(/[a-zA-Z0-9_-]+(/operations)?)?|incoming)|calls/[a-zA-Z0-9_-]+/media(/active)?)")))
         return try {
             if (method == "POST" && path == "/rtc/control/capability" && body?.has("enabled") == true && boundSession != null) {
                 if (sessionStore.read()?.sameSessionInstance(boundSession) != true) throw SessionChanged()
@@ -210,6 +210,23 @@ class ApiClient(
         }
         catch (failure: ApiFailure) { throw com.callagent.rtcmedia.MediaApiException(failure.httpStatus, failure.code) }
         catch (_: java.io.IOException) { throw com.callagent.rtcmedia.MediaApiException(503, "NETWORK_UNAVAILABLE") }
+    }
+
+    /** Asks this node's gateway for a test call: a virtual incoming call that
+     * plays a recording and rings this host only. Fails with
+     * TEST_CALL_UNSUPPORTED on a node without test_call_v1. */
+    fun requestTestCall(): JSONObject {
+        val flags = request("GET", "/capabilities", null, token = null, idempotencyKey = null)
+        if (!flags.optBoolean("test_call_v1")) throw ApiFailure(501, "TEST_CALL_UNSUPPORTED", false)
+        val gateways = listGateways()
+        val gateway = gateways.firstOrNull { it.online == true && it.voiceReady == true } ?: gateways.firstOrNull()
+            ?: throw ApiFailure(503, "GATEWAY_UNAVAILABLE", false)
+        return try {
+            com.callagent.rtcmedia.RtcCallControl(com.callagent.rtcmedia.MediaApi { method, path, body -> rtcRequest(method, path, body) })
+                .requestTestCall(gateway.gatewayId)
+        } catch (failure: com.callagent.rtcmedia.MediaApiException) {
+            throw ApiFailure(failure.status, failure.code, failure.status >= 500)
+        }
     }
 
     internal fun relayCredentials(): JSONObject? {
