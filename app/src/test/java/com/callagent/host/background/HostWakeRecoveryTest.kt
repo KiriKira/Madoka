@@ -31,6 +31,8 @@ import java.util.concurrent.atomic.AtomicInteger
 class HostWakeRecoveryTest {
     private val app=RuntimeEnvironment.getApplication()
     private var previous:Provider?=null
+    /** Server ends of opened sockets: cancelled before teardown so MockWebServer can shut down promptly. */
+    private val serverSockets=java.util.concurrent.CopyOnWriteArrayList<WebSocket>()
     @Before fun setup(){
         previous=Security.getProvider("AndroidKeyStore");Security.removeProvider("AndroidKeyStore")
         TestAndroidKeyStoreBacking.keys.clear();Security.insertProviderAt(RobolectricAndroidKeyStoreProvider(),1)
@@ -52,7 +54,7 @@ class HostWakeRecoveryTest {
     @Test fun networkAvailableExpeditesMinutesOfBackoffAndActuallyConnects() {
         MockWebServer().use{server->
             val opened=CountDownLatch(1)
-            server.dispatcher=object:okhttp3.mockwebserver.Dispatcher(){override fun dispatch(r:RecordedRequest)=if(r.path=="/v1/ws")MockResponse().withWebSocketUpgrade(object:WebSocketListener(){override fun onOpen(ws:WebSocket,response:Response){opened.countDown()}})else http()}
+            server.dispatcher=object:okhttp3.mockwebserver.Dispatcher(){override fun dispatch(r:RecordedRequest)=if(r.path=="/v1/ws")MockResponse().withWebSocketUpgrade(object:WebSocketListener(){override fun onOpen(ws:WebSocket,response:Response){serverSockets.add(ws);opened.countDown()}})else http()}
             bind(server.url("/v1").toString())
             val controller=Robolectric.buildService(HostBackgroundService::class.java).create();val service=controller.get()
             try{
@@ -67,7 +69,7 @@ class HostWakeRecoveryTest {
                 assertTrue("network recovery must perform a new wake handshake after its 2 s settle",opened.await(4,TimeUnit.SECONDS))
                 assertTrue(TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-started)<4000)
                 assertTrue("opening alone must not clear unstable-connection backoff",(field("reconnectAttempt").get(service) as AtomicInteger).get()>=8)
-            }finally{controller.destroy()}
+            }finally{controller.destroy();serverSockets.forEach{runCatching{it.close(1001,null)}}}
         }
     }
 
@@ -78,7 +80,7 @@ class HostWakeRecoveryTest {
                 if(r.path=="/v1/ws"){
                     wakeTokens.add(r.getHeader("Authorization").orEmpty())
                     if(r.getHeader("Authorization")=="Bearer old-token")return MockResponse().setResponseCode(401)
-                    return MockResponse().withWebSocketUpgrade(object:WebSocketListener(){override fun onOpen(ws:WebSocket,response:Response){opened.countDown()}})
+                    return MockResponse().withWebSocketUpgrade(object:WebSocketListener(){override fun onOpen(ws:WebSocket,response:Response){serverSockets.add(ws);opened.countDown()}})
                 }
                 if(r.path=="/v1/auth/refresh")return MockResponse().setHeader("Content-Type","application/json").setBody("""{"access_token":"new-token","refresh_token":"new-refresh","access_expires_at":"2099-01-01T00:00:00Z","refresh_expires_at":"2099-02-01T00:00:00Z"}""")
                 if(r.getHeader("Authorization")=="Bearer old-token")return MockResponse().setResponseCode(401).setBody("""{"error":{"code":"INVALID_CREDENTIALS"}}""")
@@ -92,7 +94,7 @@ class HostWakeRecoveryTest {
                 assertTrue("successful refresh must not wait the existing minutes-long backoff",opened.await(5,TimeUnit.SECONDS))
                 assertEquals(listOf("Bearer old-token","Bearer new-token"),wakeTokens.toList())
                 assertFalse((field("authReconnectPending").get(service) as AtomicBoolean).get())
-            }finally{controller.destroy()}
+            }finally{controller.destroy();serverSockets.forEach{runCatching{it.close(1001,null)}}}
         }
     }
 
@@ -112,7 +114,7 @@ class HostWakeRecoveryTest {
                 (field("networkCallback").get(service) as ConnectivityManager.NetworkCallback).onAvailable(org.robolectric.shadows.ShadowNetwork.newInstance(902))
                 Thread.sleep(2300)
                 assertEquals(1,handshakes.get())
-            }finally{controller.destroy()}
+            }finally{controller.destroy();serverSockets.forEach{runCatching{it.close(1001,null)}}}
         }
     }
 }
