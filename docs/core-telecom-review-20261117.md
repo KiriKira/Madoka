@@ -75,4 +75,16 @@
 
 ## 验证结果
 
-本地构建与 CI 结果在后续提交中补充；推送时本地构建尚在进行。
+针对修复提交 `a96a9a5`：
+
+| 检查 | 命令／位置 | 结果 |
+| --- | --- | --- |
+| CI 默认后端 | [run 531](https://github.com/KiriKira/Madoka/actions/runs/44085580407)："Assemble and run unit tests"（assembleDebug、testDebugUnitTest、lintDebug） | 通过 |
+| CI Core-Telecom 后端 | run 531："Unit tests and lint with Core-Telecom backend"（`-PcoreTelecom=true`） | 通过 |
+| CI UI 冒烟 | [Android KVM UI smoke run 209](https://github.com/KiriKira/Madoka/actions/runs/44085580490) | 推送本记录时仍在运行 |
+| 本地默认后端 | `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`（JDK 21、SDK 35） | 通过；289 项单测，0 失败、0 错误、0 跳过 |
+| 本地 Core-Telecom 后端 | `./gradlew :app:testDebugUnitTest :app:lintDebug -PcoreTelecom=true` | 通过；289 项单测，0 失败、0 错误、0 跳过 |
+
+说明：本地首轮默认构建中 `FullBackupTest` 失败一次，原因是 Robolectric 无法经代理下载 `android-all-instrumented:9` 运行时（与代码无关），重试后通过。另有一次本地 Core-Telecom 运行与另一个构建在同一目录并发执行而失败，结果作废，已顺序重跑。
+
+未做：模拟器、真机、instrumentation。P2 四项设备证据仍为空。
