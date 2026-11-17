@@ -139,6 +139,35 @@ class NodeMonitorIsolationTest {
         }
     }
 
+    @Test fun coldBackupSleepsWhilePrimaryHealthyAndActivatesWithoutPushWhenItFails() {
+        val primaryDown=java.util.concurrent.atomic.AtomicBoolean(false)
+        val coldProbes=AtomicInteger()
+        StubServer { exchange ->
+            if(primaryDown.get())exchange.reply(503,"{}")
+            else if(exchange.path=="/v1/capabilities")exchange.reply(200,"""{"rtc_call_control":true,"extensions":["mesh"]}""")
+            else exchange.reply(200,"""{"items":[{"gateway_id":"primary-gateway","online":true,"rtc_call_control_ready":true,"install_id":"install-test"}]}""")
+        }.use { primary ->
+            StubServer { exchange ->
+                if(exchange.path=="/v1/capabilities") {coldProbes.incrementAndGet();exchange.reply(200,"""{"rtc_call_control":true,"extensions":["mesh","cold_standby_v1"]}""")}
+                else exchange.reply(200,"""{"items":[{"gateway_id":"cold-gateway","online":true,"rtc_call_control_ready":true,"install_id":"install-test"}]}""")
+            }.use { cold ->
+                SessionStore(app).replace(session(primary.baseUrl))
+                val coldSession=session(cold.baseUrl)
+                HostNodes.inactiveStore(app,"cold-test").replace(coldSession)
+                HostNodes.register(app,"cold-test",coldSession,"install-test")
+                NodeMonitor.evaluate(app,force=true)
+                assertEquals(1,coldProbes.get())
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(16))
+                NodeMonitor.evaluate(app)
+                assertEquals("healthy primary needs no periodic request to the cold backup",1,coldProbes.get())
+                primaryDown.set(true)
+                org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(16))
+                assertEquals(coldSession.sessionInstanceId,NodeMonitor.evaluate(app)?.sessionInstanceId)
+                assertEquals(2,coldProbes.get())
+            }
+        }
+    }
+
     private fun session(baseUrl: String) = HostSession(UUID.randomUUID().toString(), baseUrl,
         "test-owner", UUID.randomUUID().toString(), "client", "test-access", "2099-01-01T00:00:00Z",
         "test-refresh", "2099-02-01T00:00:00Z")

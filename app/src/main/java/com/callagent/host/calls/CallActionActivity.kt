@@ -55,7 +55,7 @@ class CallActionActivity : AppCompatActivity() {
     }
     private val updateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.getStringExtra(CallRuntime.EXTRA_CHANGED_CALL_ID) == callId || callId == "pending") render()
+            if (intent?.getStringExtra(CallRuntime.EXTRA_CHANGED_CALL_ID) == callId || intent?.getStringExtra("call_id")==callId || callId == "pending") render()
         }
     }
 
@@ -156,7 +156,7 @@ class CallActionActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (!receiverRegistered) {
-            ContextCompat.registerReceiver(this, updateReceiver, IntentFilter(CallRuntime.ACTION_STATE_CHANGED), ContextCompat.RECEIVER_NOT_EXPORTED)
+            ContextCompat.registerReceiver(this, updateReceiver, IntentFilter(CallRuntime.ACTION_STATE_CHANGED).apply{addAction(com.callagent.rtcmedia.RelayStatus.ACTION)}, ContextCompat.RECEIVER_NOT_EXPORTED)
             receiverRegistered = true
         }
         render()
@@ -231,6 +231,7 @@ class CallActionActivity : AppCompatActivity() {
             setTextColor(color(androidx.appcompat.R.attr.colorPrimary))
             setPadding(0, dp(8), 0, dp(if (compact) 8 else 16))
         })
+        activeId?.let{com.callagent.rtcmedia.RelayStatus.label(it)}?.let{root.addView(label(it,14f))}
         call?.endNotice?.takeIf { it.isNotBlank() }?.let { root.addView(label(it, 15f)) }
         if (call?.phase == CallPhase.FAILED) root.addView(label("连接失败，请检查网络后重试", 15f))
         if (call?.phase == CallPhase.ACTIVE && CallRuntime.currentStatus.let { it.contains("网络") || it.contains("恢复") }) {

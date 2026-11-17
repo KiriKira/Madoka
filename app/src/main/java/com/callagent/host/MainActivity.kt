@@ -1190,6 +1190,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderSettingsHome(content: LinearLayout) {
         content.addView(title("设置"))
+        content.addView(android.widget.Button(this).apply { text = "中继来源"; setOnClickListener { runCatching{com.callagent.host.data.RelayNodeSources.configure(this@MainActivity)};startActivity(android.content.Intent(this@MainActivity, com.callagent.rtcmedia.RelaySettingsActivity::class.java)) } })
         settingsMessage?.let { content.addView(messageCard(it, error = true)) }
         if (session == null) {
             content.addView(HostUi.groupHeader(this, "服务器与配对").apply { id = R.id.settings_pairing_section })
@@ -1209,6 +1210,7 @@ class MainActivity : AppCompatActivity() {
                 summary = "账号 ${shortId(session?.ownerId.orEmpty())}",
                 icon = R.drawable.ic_ui_server))
             addServerNodes(content)
+            content.addView(android.widget.Button(this).apply { text = "测试通话"; setOnClickListener { requestTestCall() } })
             content.addView(HostUi.groupHeader(this, "已配对设备"))
             val devices = LinearLayout(this).apply {
                 id = R.id.settings_device_list
@@ -3133,6 +3135,32 @@ class MainActivity : AppCompatActivity() {
                     showDashboard()
                 }
             }
+        }
+    }
+
+    /** Asks the old phone to call this phone and play a recording. The call
+     * then rings like any incoming call; its media logs `test_call=true`. */
+    private fun requestTestCall() {
+        val expectedSession = session ?: return
+        showToast("正在请求测试通话…")
+        executor.execute {
+            val message = try {
+                val reply = ApiClient(expectedSession.apiBaseUrl, sessionStore).requestTestCall()
+                com.callagent.host.data.HostRunLog.add("RTC", "test_call requested request=${reply.optString("request_id").take(8)} gateway=${reply.optString("gateway_id").take(8)}")
+                "已请求测试通话，旧手机将在几秒内来电"
+            } catch (failure: ApiFailure) {
+                com.callagent.host.data.HostRunLog.add("RTC", "test_call request_failed status=${failure.httpStatus} code=${failure.code}")
+                when (failure.code) {
+                    "TEST_CALL_UNSUPPORTED" -> "当前服务器节点不支持测试通话，请先升级服务器"
+                    "GATEWAY_BUSY" -> "旧手机正在通话，或已有一次测试通话在进行"
+                    "GATEWAY_UNAVAILABLE" -> "旧手机离线或通话功能未就绪"
+                    else -> "测试通话请求失败（${failure.code.ifBlank { failure.httpStatus.toString() }}）"
+                }
+            } catch (failure: Exception) {
+                com.callagent.host.data.HostRunLog.add("RTC", "test_call request_failed error=${failure.javaClass.simpleName}")
+                "测试通话请求失败，请检查网络"
+            }
+            mainHandler.post { showToast(message) }
         }
     }
 
