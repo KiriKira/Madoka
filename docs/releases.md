@@ -9,11 +9,15 @@ generate or substitute a development key during a build.
 
 | Trigger | Android version name | GitHub release |
 |---|---|---|
-| Push to `main` | `0.4.0-build-${run_number}-${sha7}` | Prerelease tagged `build-${run_number}-${sha7}` |
-| Push of a `v*` tag | The exact tag, such as `v0.4.0` | Stable release under that tag |
-| Manual run on `main`, `publish=true` | `0.4.0-build-${run_number}-${sha7}` | Prerelease |
-| Manual run on `main`, `publish=false` | `0.4.0-build-${run_number}-${sha7}` | Signed build and validation only |
-| Manual run on another branch or any tag | `0.4.0-build-${run_number}-${sha7}` | Build and validation only; publication is disabled |
+| Push to `main` | `v<next patch>-dev<N>`, such as `v1.0.2-dev3` | Prerelease under the same tag |
+| Push of a `vMAJOR.MINOR.PATCH` tag | The exact tag, such as `v1.0.1` | Stable release under that tag |
+| Manual run on `main`, `publish=true` | `v<next patch>-dev<N>` | Prerelease |
+| Manual run on `main`, `publish=false` | `v<next patch>-dev<N>` | Signed build and validation only |
+| Manual run on another branch or any tag | `v<next patch>-dev<N>` | Build and validation only; publication is disabled |
+
+`N` counts the commits on `main`'s first-parent line since the latest stable
+tag, so every merge to `main` gets the next number: `v1.0.2-dev1`,
+`v1.0.2-dev2`, … after `v1.0.1`. Prerelease tags never trigger a stable build.
 
 Manual runs default `publish` to true. The publisher job also checks the event
 and ref independently: manual publication is permitted only from `main`, and
