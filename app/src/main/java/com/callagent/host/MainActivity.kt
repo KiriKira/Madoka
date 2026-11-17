@@ -527,30 +527,31 @@ class MainActivity : AppCompatActivity() {
         if (entries.isEmpty()) return
         val app = applicationContext
         val deviceName = Build.MODEL.orEmpty().ifBlank { "Android host" }.take(100)
-        showToast("正在加入 ${entries.size} 个节点…")
+        val progress = nodeProgressDialog("正在加入 ${entries.size} 个节点…")
         nodeExecutor.execute {
+            var failed = 0
             val lines = entries.map { entry ->
                 val label = HostNodes.hostLabel(entry.serverUrl)
+                mainHandler.post { progress.setMessage("正在连接 $label 并验证…") }
                 runCatching {
                     HostNodes.add(app, entry.serverUrl, entry.pairingCode, deviceName,
-                        onWaiting = { mainHandler.post { showToast("正在等待旧手机加入 $label…") } })
+                        onWaiting = { mainHandler.post { progress.setMessage("正在等待旧手机加入 $label（最多约 45 秒）…") } })
                 }
                     .fold(
                         onSuccess = { node -> HostNodes.catchUpSilently(app, node); "$label：已加入" },
-                        onFailure = { failure ->
-                            "$label：未加入（${(failure as? com.callagent.host.mesh.NodeSetupFailure)?.message
-                                ?: apiFailureText(failure as? Exception ?: Exception(failure))}）"
-                        }
+                        onFailure = { failure -> failed++; "$label：未加入（${nodeFailureText(failure).trimEnd('。')}）" }
                     )
             }
             com.callagent.host.push.PushRegistration.sync(app, force = true)
             mainHandler.post {
                 if (isDestroyed) return@post
+                runCatching { progress.dismiss() }
                 session = sessionStore.read() ?: session
-                settingsMessage = lines.joinToString("\n")
                 navigation = navigation.selectTab(HostTab.SETTINGS)
                 renderCurrentScreen()
                 probeNodes(force = true)
+                showNodeResult(if (failed == 0) "节点已加入" else if (failed == entries.size) "未加入节点" else "部分节点未加入",
+                    lines.joinToString("\n") + if (failed > 0) "\n\n未加入的节点不会留在列表里，可以检查后重试。" else "")
             }
         }
     }
@@ -1506,6 +1507,24 @@ class MainActivity : AppCompatActivity() {
         showToast("正在重新登记推送…")
     }
 
+    /** Stays up while a node is verified; "后台继续" only hides it, the result still shows. */
+    private fun nodeProgressDialog(message: String): androidx.appcompat.app.AlertDialog =
+        MaterialAlertDialogBuilder(this)
+            .setTitle("添加服务器节点")
+            .setMessage(message)
+            .setCancelable(false)
+            .setNegativeButton("后台继续", null)
+            .show()
+
+    private fun showNodeResult(title: String, message: String) {
+        if (isDestroyed || isFinishing) return
+        MaterialAlertDialogBuilder(this).setTitle(title).setMessage(message).setPositiveButton("知道了", null).show()
+    }
+
+    private fun nodeFailureText(failure: Throwable): String =
+        (failure as? com.callagent.host.mesh.NodeSetupFailure)?.message?.takeIf { it.isNotBlank() }
+            ?: apiFailureText(failure as? Exception ?: Exception(failure))
+
     private fun showAddNodeDialog() {
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1530,12 +1549,11 @@ class MainActivity : AppCompatActivity() {
                 val deviceName = Build.MODEL.orEmpty().ifBlank { "Android host" }.take(100)
                 val app = applicationContext
                 settingsMessage = null
-                statusMessage = "正在验证并添加节点…"
-                showToast("正在验证并添加节点…")
+                val progress = nodeProgressDialog("正在连接 ${HostNodes.hostLabel(url)} 并验证…")
                 nodeExecutor.execute {
                     val result = runCatching {
                         HostNodes.add(app, url, code, deviceName,
-                            onWaiting = { mainHandler.post { showToast("正在等待旧手机加入这个服务器…") } })
+                            onWaiting = { mainHandler.post { progress.setMessage("正在等待旧手机加入这个服务器（最多约 45 秒）…") } })
                     }
                     // History catch-up runs after the result is shown; it is silent and best-effort.
                     result.getOrNull()?.let { node ->
@@ -1544,15 +1562,17 @@ class MainActivity : AppCompatActivity() {
                     }
                     mainHandler.post {
                         if (isDestroyed) return@post
+                        runCatching { progress.dismiss() }
                         result.onSuccess { node ->
                             // The active pairing now belongs to a profile.
                             session = sessionStore.read() ?: session
                             showToast("已添加节点 ${node.label}")
                             probeNodes(force = true)
                         }.onFailure { failure ->
-                            val reason = if (failure is com.callagent.host.mesh.NodeSetupFailure) failure.message.orEmpty()
-                                else apiFailureText(failure as? Exception ?: Exception(failure))
-                            settingsMessage = "未添加节点：$reason"
+                            // A dialog, not the Settings message card: that card sits at
+                            // the top of the page, out of view from the node list, and the
+                            // next refresh cleared it before anyone scrolled up to it.
+                            showNodeResult("未添加节点", "${HostNodes.hostLabel(url)}：${nodeFailureText(failure)}\n\n节点列表没有变化，可以检查后重试。")
                         }
                         renderCurrentScreen()
                     }
@@ -3654,7 +3674,20 @@ class MainActivity : AppCompatActivity() {
         is SessionNeedsPairing -> "会话已撤销，请重新配对此手机。"
         is SessionChanged -> "当前账户已变化。"
         is ApiFailure -> "服务器返回 ${failure.httpStatus}${failure.code.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()}。"
-        else -> "连接失败（${failure.javaClass.simpleName}）。"
+        else -> networkFailureText(failure)
+    }
+
+    /** What a transport failure means for the address the user typed. */
+    private fun networkFailureText(failure: Throwable): String {
+        val causes = generateSequence(failure) { it.cause }.take(5).toList()
+        return when {
+            causes.any { it is java.net.UnknownHostException } -> "找不到这个服务器地址（域名无法解析），请检查地址或网络。"
+            causes.any { it is java.net.SocketTimeoutException } -> "连接服务器超时，请检查地址、端口和网络。"
+            causes.any { it is java.net.ConnectException } -> "无法连接服务器（连接被拒绝或不可达），请检查地址和端口。"
+            causes.any { it is javax.net.ssl.SSLException } -> "HTTPS 握手失败，请检查证书或改用正确的 http/https 地址。"
+            causes.any { it is java.net.MalformedURLException || it is IllegalArgumentException } -> "服务器地址格式不正确。"
+            else -> "连接失败（${failure.javaClass.simpleName}）。"
+        }
     }
 
     private fun shortId(value: String): String = value.take(8)
