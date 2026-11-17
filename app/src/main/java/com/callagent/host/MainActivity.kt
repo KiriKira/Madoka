@@ -426,6 +426,7 @@ class MainActivity : AppCompatActivity() {
         resumed = true
         registerBackgroundReceiver()
         refreshBackgroundStatus()
+        adaptiveHost?.findViewById<View>(R.id.settings_turn_relay)?.let { replaceInParent(it, turnRelayTile()) }
         if (session != null && (backgroundStatus?.lastSyncAt ?: 0L) > lastRenderedBackgroundSyncAt) {
             refreshVisibleCache()
         }
@@ -1190,7 +1191,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderSettingsHome(content: LinearLayout) {
         content.addView(title("设置"))
-        content.addView(android.widget.Button(this).apply { text = "中继来源"; setOnClickListener { runCatching{com.callagent.host.data.RelayNodeSources.configure(this@MainActivity)};startActivity(android.content.Intent(this@MainActivity, com.callagent.rtcmedia.RelaySettingsActivity::class.java)) } })
         settingsMessage?.let { content.addView(messageCard(it, error = true)) }
         if (session == null) {
             content.addView(HostUi.groupHeader(this, "服务器与配对").apply { id = R.id.settings_pairing_section })
@@ -1210,7 +1210,6 @@ class MainActivity : AppCompatActivity() {
                 summary = "账号 ${shortId(session?.ownerId.orEmpty())}",
                 icon = R.drawable.ic_ui_server))
             addServerNodes(content)
-            content.addView(android.widget.Button(this).apply { text = "测试通话"; setOnClickListener { requestTestCall() } })
             content.addView(HostUi.groupHeader(this, "已配对设备"))
             val devices = LinearLayout(this).apply {
                 id = R.id.settings_device_list
@@ -1297,7 +1296,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addStandbyAndBackupSettings(content: LinearLayout) {
-        content.addView(HostUi.groupHeader(this, "待机与省电"))
+        content.addView(HostUi.groupHeader(this, "高级"))
         val sleepy = com.callagent.host.calls.StandbyPowerPolicy.sleepyListening(this)
         content.addView(HostUi.tile(this, HostUi.Position.FIRST, "省电接听",
             summary = if (sleepy) "已开启" else "已关闭 · 兼容接听",
@@ -1339,6 +1338,12 @@ class MainActivity : AppCompatActivity() {
                         }, "导出待机统计"))
                     }.show()
             }))
+        if (session != null) {
+            content.addView(HostUi.tile(this, HostUi.Position.MIDDLE, "测试通话",
+                summary = "旧手机打来一通播放音乐的虚拟来电，用来检查接通速度和音质；不占用 SIM 卡",
+                icon = R.drawable.call_ui_phone,
+                onClick = { requestTestCall() }).apply { id = R.id.settings_test_call })
+        }
         content.addView(HostUi.tile(this, HostUi.Position.LAST, "运行日志",
             summary = "来电、拨号、推送与呼叫控制的经过；不含号码和短信内容",
             icon = R.drawable.ic_ui_refresh,
@@ -1445,7 +1450,19 @@ class MainActivity : AppCompatActivity() {
         }
         content.addView(HostUi.tile(this, addPosition, "添加服务器节点",
             icon = R.drawable.ic_ui_add, onClick = { showAddNodeDialog() }).apply { id = R.id.settings_nodes_add })
+        content.addView(HostUi.groupHeader(this, "TURN 中继"))
+        content.addView(turnRelayTile())
     }
+
+    /** The relay settings entry; [onResume] swaps in a fresh one after the page is left. */
+    private fun turnRelayTile(): View = HostUi.tile(this, HostUi.Position.SINGLE, "TURN 中继",
+        summary = com.callagent.rtcmedia.RelaySettingsActivity.summary(this),
+        icon = com.callagent.rtcmedia.R.drawable.rtc_relay_ic_relay,
+        trailing = HostUi.chevron(this),
+        onClick = {
+            runCatching { com.callagent.host.data.RelayNodeSources.configure(this) }
+            startActivity(Intent(this, com.callagent.rtcmedia.RelaySettingsActivity::class.java))
+        }).apply { id = R.id.settings_turn_relay }
 
     private fun serverNodeRows(nodes: List<com.callagent.host.mesh.HostNode>): List<com.callagent.host.ui.NodeRow> {
         val push = nodes.associate { it.key to com.callagent.host.push.PushRegistration.status(this, it.sessionInstanceId) }
