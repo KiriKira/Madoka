@@ -81,7 +81,7 @@
 | --- | --- | --- |
 | CI 默认后端 | [run 531](https://github.com/KiriKira/Madoka/actions/runs/44085580407)："Assemble and run unit tests"（assembleDebug、testDebugUnitTest、lintDebug） | 通过 |
 | CI Core-Telecom 后端 | run 531："Unit tests and lint with Core-Telecom backend"（`-PcoreTelecom=true`） | 通过 |
-| CI UI 冒烟 | [Android KVM UI smoke run 209](https://github.com/KiriKira/Madoka/actions/runs/44085580490) | 推送本记录时仍在运行 |
+| CI UI 冒烟 | [Android KVM UI smoke run 209](https://github.com/KiriKira/Madoka/actions/runs/44085580490) | 通过 |
 | 本地默认后端 | `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`（JDK 21、SDK 35） | 通过；289 项单测，0 失败、0 错误、0 跳过 |
 | 本地 Core-Telecom 后端 | `./gradlew :app:testDebugUnitTest :app:lintDebug -PcoreTelecom=true` | 通过；289 项单测，0 失败、0 错误、0 跳过 |
 
