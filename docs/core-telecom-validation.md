@@ -5,7 +5,7 @@
 ## 当前实现范围
 
 - 固定 Core-Telecom 1.0.1 和 coroutines-android 1.8.1，保留原编译工具、minSdk 26 和 targetSdk 34。
-- 默认构建使用 Core-Telecom；`-PcoreTelecom=false` 构建选用保留的 LegacyCallTelecomController，不在单通电话建立失败后切换实现。
+- 默认构建与 release 构建使用保留的 LegacyCallTelecomController（现有 ConnectionService，已加入本机保持，对应计划 P1）；`-PcoreTelecom=true` 才选用 Core-Telecom。设备证据记录到本文后再改默认值。不在单通电话建立失败后切换实现。（2026-11-17 起；此前默认值为 Core-Telecom，见 [core-telecom-review-20261117.md](core-telecom-review-20261117.md)。）
 - 实现独立于服务端阶段和用户静音的本机保持，以及媒体许可合取。网络恢复／前台服务就绪不能越过平台保持；终态不允许重新启用媒体。
 - 新外呼先等平台注册就绪，再下发远程拨号。传给本机 Telecom 的地址始终为 `gsm2sip:<callId>`，不传电话号码 URI。
 - 进程级协程承载通话，断开完成后停止通话服务；提前挂断等待注册结果。库端点观察任务另行持有并在断开结果后取消，避免 1.0.1 兼容路径的 channel 未关闭导致父协程一直等待。
@@ -27,25 +27,25 @@
 
 ## 构建与自动化命令
 
-在当前云环境先 `source /workspace/.onboarding/env.sh`。其他开发环境使用已配置的 JDK 17 和 Android SDK 35。
+使用 JDK 17（或 21）和 Android SDK 35（`ANDROID_HOME` 或 `local.properties` 的 `sdk.dir`）。
 
 ```sh
-./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug --no-daemon --max-workers=2
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug -PcoreTelecom=true --no-daemon --max-workers=2
 ```
 
-回退构建检查：
+默认（ConnectionService）构建检查：
 
 ```sh
-./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug -PcoreTelecom=false --no-daemon --max-workers=2
+./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --no-daemon --max-workers=2
 ```
 
 x86_64 联合测试包准备命令（只编译，不启动模拟器）：
 
 ```sh
-./gradlew :app:assembleDebug :app:assembleDebugAndroidTest -PrtcLabAbi=x86_64 -PrtcLabRunner=com.callagent.lab.HostJointInstrumentation --no-daemon --max-workers=2
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest -PcoreTelecom=true -PrtcLabAbi=x86_64 -PrtcLabRunner=com.callagent.lab.HostJointInstrumentation --no-daemon --max-workers=2
 ```
 
-切回默认构建后再生成 arm64 候选 APK，避免误将回退 APK 用于 Core-Telecom 测试。新增单测覆盖媒体许可交错、保持不改变业务阶段／静音、终态拒绝恢复、迟到的激活结果不能覆盖系统保持、显式能力位、不透明外呼地址、断开原因和提前挂断等待平台结果。旧服务启动时序测试显式选择 legacy 后端，继续覆盖回退实现；它不能代替新后端的设备测试。
+Core-Telecom 设备测试的 APK 必须带 `-PcoreTelecom=true` 构建；默认构建是 ConnectionService 后端，不能拿来当 Core-Telecom 证据。新增单测覆盖媒体许可交错、保持不改变业务阶段／静音、终态拒绝恢复、迟到的激活结果不能覆盖系统保持、显式能力位、不透明外呼地址、断开原因和提前挂断等待平台结果。旧服务启动时序测试显式选择 legacy 后端，继续覆盖回退实现；它不能代替新后端的设备测试。
 
 ## 模拟器执行清单（尚未执行）
 
@@ -74,6 +74,6 @@ API 33 或更低及 API 34+ 各一台真机验证本机 SIM 冲突、蓝牙／�
 - 检查合并 Manifest：默认构建禁用旧 ConnectionService、包含库的 JetpackConnectionService；未引入 READ_PHONE_STATE。回退构建启用旧 ConnectionService。
 - `git diff --check` 通过。未启动模拟器、未运行设备 instrumentation、未触发正式发布。
 
-当前云工作区产物保存在 `/workspace/shared/core-telecom/`：`core-arm64-debug.apk`、`core-arm64-androidTest.apk`、`core-x86_64-debug.apk`、`core-x86_64-androidTest.apk`，另有构建日志和 `SHA256SUMS`。这些是本地测试产物，不是正式发布包；回退临时 APK 也不用于覆盖安装验收，因为尚未配置递增 versionCode。
+当时生成的 APK 只保存在实现者自己的临时工作区，未随仓库提交，也不是正式发布包；设备验证前按上面的命令重新构建。回退临时 APK 不用于覆盖安装验收，因为尚未配置递增 versionCode。
 
 后续从上面的“模拟器执行清单”开始，不将本节的自动化结果替代 P2 四项设备证据。

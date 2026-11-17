@@ -69,7 +69,9 @@ internal object CoreTelecomAdapter {
                     onAnswer = answerCallback@ {
                         checkCurrent(session)
                         if (CallRuntime.snapshot(details.callId)?.phase in setOf(CallPhase.ANSWERING, CallPhase.ACTIVE)) return@answerCallback
-                        check(CallRuntime.snapshot(details.callId)?.phase == CallPhase.INCOMING_RINGING)
+                        // Expired or no longer ringing: fail the callback so Telecom does not answer
+                        // (and hold the user's SIM call) for a call the server will not connect.
+                        check(CallRuntime.coordinator.canAnswer(details.callId)) { "Incoming call can no longer be answered" }
                         session.activation.observe(true)
                         CallRuntime.onTelecomActive(details.callId)
                         CallRuntime.onTelecomAnswer(details.callId)
@@ -123,7 +125,10 @@ internal object CoreTelecomAdapter {
                         }
                     }
                 }
-                if (!session.closing) CallRuntime.onTelecomIncomingFailed(details.callId)
+                if (!session.closing) {
+                    if (details.direction == CallDirection.INCOMING) CallRuntime.onTelecomIncomingFailed(details.callId)
+                    else CallRuntime.onTelecomOutgoingFailed(details.callId)
+                }
             } finally {
                 session.observers.forEach { it.cancel() }
                 session.closed.complete(Unit)
@@ -136,8 +141,9 @@ internal object CoreTelecomAdapter {
         try { action() }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
+            // Route/mute updates are display state; losing them must not end a live call.
             Log.w("CoreTelecom", "observer failed: ${failure.javaClass.simpleName}")
-            if (!session.closing) CallRuntime.onTelecomIncomingFailed(session.details.callId)
+            if (!session.closing) CallRuntime.setStatus("系统音频状态暂时无法更新。", session.details.callId)
         }
     }
 
@@ -162,6 +168,9 @@ internal object CoreTelecomAdapter {
         }
     }
     fun answer(id: String, accepted: () -> Unit) = operate(id) { session, control ->
+        // Re-checked after waiting for registration and the operation lock: the call may have
+        // expired meanwhile. Telecom then never answers; the inbound expiry timer ends the call.
+        if (!CallRuntime.coordinator.canAnswer(id)) return@operate
         val revision = session.activation.beginRequest()
         requireSuccess(control.answer(CallAttributesCompat.CALL_TYPE_AUDIO_CALL))
         checkCurrent(session)

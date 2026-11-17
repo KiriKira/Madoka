@@ -48,3 +48,8 @@ jobs:
             BUILD-INFO.json
             DEBUG-BATCH.md
           if-no-files-found: error
+      # Runs after the APK is staged and uploaded, so the published debug APK
+      # stays the default (ConnectionService) backend. This only compiles,
+      # unit-tests and lints the opt-in Core-Telecom backend.
+      - name: Unit tests and lint with Core-Telecom backend
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug -PcoreTelecom=true --no-daemon --max-workers=2

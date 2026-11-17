@@ -81,6 +81,22 @@ class CallSessionCoordinatorTest {
         assertEquals(CallPhase.INCOMING_RINGING, coordinator.current?.phase)
     }
 
+    /** The UI asks this before Telecom answers, which can hold the user's own SIM call. */
+    @Test
+    fun canAnswerMatchesAnswerWithoutChangingState() {
+        val coordinator = CallSessionCoordinator()
+        assertFalse(coordinator.canAnswer("call-1", now))
+        assertTrue(coordinator.incomingInvite(invite(), authority(), now))
+
+        assertFalse(coordinator.canAnswer("other-call", now))
+        assertFalse(coordinator.canAnswer("call-1", now + 25_000))
+        assertTrue(coordinator.canAnswer("call-1", now))
+        assertEquals(CallPhase.INCOMING_RINGING, coordinator.current?.phase)
+
+        assertTrue(coordinator.answer("call-1", now))
+        assertFalse(coordinator.canAnswer("call-1", now))
+    }
+
     @Test
     fun outboundCanOnlyProgressOnceForItsServerCallId() {
         val coordinator = CallSessionCoordinator()

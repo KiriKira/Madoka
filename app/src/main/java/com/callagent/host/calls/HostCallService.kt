@@ -136,7 +136,7 @@ class HostCallService : android.app.Service() {
         stopSignalingForeground()
         CallSignalingNotification.cancel(this)
         CallRuntime.currentCallId?.takeIf { CallRuntime.owns(this) }?.let { id ->
-            CallRuntime.coordinator.failed(id, "Call service stopped")
+            if (CallRuntime.coordinator.failed(id, "Call service stopped")) CallRuntime.notifyChanged(id)
             CallTelecomController.disconnect(id, android.telecom.DisconnectCause.LOCAL) {
                 if (CallRuntime.currentCallId == id) {
                     CallForegroundService.stop(this)

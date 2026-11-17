@@ -197,7 +197,13 @@ object CallRuntime {
     fun answerFromVisibleUser(context: Context, callId: String): Boolean {
         com.callagent.host.data.HostRunLog.add("UI","answer tapped call=${callId.take(8)} phase=${snapshot(callId)?.phase}")
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return false
-        if (service == null || snapshot(callId)?.phase != CallPhase.INCOMING_RINGING) return false
+        val host = service ?: return false
+        // Answering on the platform can hold the user's own SIM call, so an expired or
+        // no-longer-ringing call is refused here, before Telecom is involved.
+        if (!coordinator.canAnswer(callId)) {
+            expireIncomingAnswerIfNeeded(host, callId)
+            return false
+        }
         CallTelecomController.answer(callId) { onTelecomAnswer(callId) }
         return true
     }

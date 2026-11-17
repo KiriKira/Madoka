@@ -57,8 +57,12 @@ android {
 
         testInstrumentationRunner = providers.gradleProperty("rtcLabRunner").orElse("androidx.test.runner.AndroidJUnitRunner").get()
         // Experimental timing changes stay opt-in until physical-device acceptance.
-        buildConfigField("boolean", "CORE_TELECOM", providers.gradleProperty("coreTelecom").orElse("true").get().toBoolean().toString())
-        manifestPlaceholders["legacyTelecomEnabled"] = providers.gradleProperty("coreTelecom").orElse("true").get().toBoolean().not().toString()
+        // Core-Telecom stays opt-in (-PcoreTelecom=true) until its device evidence is recorded in
+        // docs/core-telecom-validation.md. Default and release builds use the existing
+        // ConnectionService, which now also supports local hold.
+        val coreTelecom = providers.gradleProperty("coreTelecom").orElse("false").get().toBoolean()
+        buildConfigField("boolean", "CORE_TELECOM", coreTelecom.toString())
+        manifestPlaceholders["legacyTelecomEnabled"] = coreTelecom.not().toString()
         buildConfigField("boolean", "STANDBY_EXPERIMENTS", providers.gradleProperty("standbyExperiments").orElse("false").get().toBoolean().toString())
         buildConfigField("long", "STANDBY_METADATA_MS", "${providers.gradleProperty("standbyMetadataMs").orElse("300000").get().toLong().coerceAtLeast(30000)}L")
         buildConfigField("long", "STANDBY_SMS_LIVE_MS", "${providers.gradleProperty("standbySmsLiveMs").orElse("120000").get().toLong().coerceAtLeast(30000)}L")

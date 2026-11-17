@@ -116,11 +116,16 @@ class CallSessionCoordinator {
 
     @Synchronized
     fun answer(callId: String, nowEpochMillis: Long = System.currentTimeMillis()): Boolean = update(callId) { state ->
-        if (state.direction != CallDirection.INCOMING || state.phase != CallPhase.INCOMING_RINGING ||
-            state.expiresAtEpochMillis <= nowEpochMillis
-        ) null
-        else state.copy(phase = CallPhase.ANSWERING)
+        if (!state.answerable(nowEpochMillis)) null else state.copy(phase = CallPhase.ANSWERING)
     }
+
+    /** Whether [answer] would accept now; checked before the platform is asked to answer. */
+    @Synchronized
+    fun canAnswer(callId: String, nowEpochMillis: Long = System.currentTimeMillis()): Boolean =
+        current?.takeIf { it.callId == callId }?.answerable(nowEpochMillis) == true
+
+    private fun CallSession.answerable(nowEpochMillis: Long): Boolean =
+        direction == CallDirection.INCOMING && phase == CallPhase.INCOMING_RINGING && expiresAtEpochMillis > nowEpochMillis
 
     @Synchronized
     fun connected(callId: String): Boolean = update(callId) { state ->
