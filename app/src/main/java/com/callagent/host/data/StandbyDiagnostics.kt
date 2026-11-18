@@ -202,11 +202,18 @@ object StandbyDiagnostics {
     }
 
     internal fun record(method: String, path: String, success: Boolean, nanos: Long, sent: Long = 0, received: Long = 0, source: String = "") {
+        val bare = path.substringBefore('?')
         val category = when {
-            path == "/capabilities" -> "capabilities"
-            path.startsWith("/rtc/control/") -> "rtc_control"
-            path.startsWith("/events") -> "events"
-            path.startsWith("/gateways") -> "metadata"
+            bare == "/capabilities" -> "capabilities"
+            bare.startsWith("/rtc/control/") -> "rtc_control"
+            bare.startsWith("/events") -> "events"
+            bare.startsWith("/gateways") -> "metadata"
+            bare.startsWith("/auth/") -> "auth"
+            bare.startsWith("/devices/self/push-endpoint") -> "push_endpoint"
+            bare == "/devices/self/reception" -> "reception"
+            bare.startsWith("/messages") -> "messages"
+            bare.startsWith("/calls") || bare.startsWith("/rtc/legs") || bare == "/rtc/ice-servers" -> "media"
+            bare == "/clients" -> "clients"
             else -> "other"
         }
         val verb = if (method == "GET") "read" else "write"
@@ -222,5 +229,5 @@ object StandbyDiagnostics {
         Counts(c.requests.get(), c.failures.get(), c.nanos.get(), c.sent.get(), c.received.get())
     }
 
-    private val CAUSES = setOf("periodic", "push", "websocket", "network", "node_probe", "foreground", "rtc")
+    private val CAUSES = setOf("periodic", "push", "websocket", "network", "node_probe", "foreground", "rtc", "reception", "maintain", "push_registration")
 }

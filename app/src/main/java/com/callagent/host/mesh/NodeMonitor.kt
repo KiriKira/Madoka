@@ -176,10 +176,10 @@ object NodeMonitor {
             for ((session, store) in pairs) {
                 if (session.sessionInstanceId in unreachable) continue
                 if (!maintenancePending.add(session.sessionInstanceId)) continue
-                renewals += maintenanceWorkers.submit(Runnable {
+                renewals += maintenanceWorkers.submit(Runnable { com.callagent.host.data.StandbyDiagnostics.withCause("maintain") {
                     try {
                         val prefs = com.callagent.host.calls.CallPreferences(app)
-                        if (store.read()?.sessionInstanceId != session.sessionInstanceId) return@Runnable
+                        if (store.read()?.sessionInstanceId != session.sessionInstanceId) return@withCause
                         val api = ApiClient(session.apiBaseUrl, store, CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS)
                         // A reception v2 node keeps the choice itself: write it when it
                         // changes, and renew nothing. A node is switched only between calls.
@@ -193,13 +193,13 @@ object NodeMonitor {
                                     reception.sync(app, session, api) { reception.choice(app, session) }
                                 }
                             }
-                            return@Runnable
+                            return@withCause
                         }
                         // The active engine owns the capability of an outgoing call even with listening off.
                         val active = com.callagent.host.data.SessionStore(app).read()
-                        if (callInProgress() && active?.sessionInstanceId == session.sessionInstanceId) return@Runnable
+                        if (callInProgress() && active?.sessionInstanceId == session.sessionInstanceId) return@withCause
                         val enabled = prefs.enabledFor(session)
-                        if (!enabled && advertised[session.sessionInstanceId] == false) return@Runnable
+                        if (!enabled && advertised[session.sessionInstanceId] == false) return@withCause
                         fun send(value: Boolean) = com.callagent.host.data.StandbyDiagnostics.withCause("rtc") {
                             api.rtcRequest("POST", "/rtc/control/capability", org.json.JSONObject().put("version", 1).put("enabled", value))
                         }
@@ -212,7 +212,7 @@ object NodeMonitor {
                         }
                     } catch (_: Exception) { /* Retry next maintenance round, independently per node. */ }
                     finally { maintenancePending.remove(session.sessionInstanceId) }
-                })
+                } })
             }
             val deadline = SystemClock.elapsedRealtime() + MAINTAIN_LOCK_MS
             renewals.forEach { renewal ->

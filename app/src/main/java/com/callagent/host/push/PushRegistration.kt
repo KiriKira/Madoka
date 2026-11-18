@@ -215,14 +215,14 @@ object PushRegistration {
             if (!upgraded && !PushRegistrationPolicy.shouldAttempt(state, endpointHash, now)) continue
             contacted = true
             var endpointRejected = false
-            val outcome = try {
+            val outcome = try { com.callagent.host.data.StandbyDiagnostics.withCause("push_registration") {
                 val api = ApiClient(session.apiBaseUrl, store)
                 if (!api.pushAvailable()) PushRegistrationPolicy.Outcome.UNSUPPORTED
                 else {
                     api.registerPushEndpoint(endpoint)
                     PushRegistrationPolicy.Outcome.REGISTERED
                 }
-            } catch (failure: ApiFailure) {
+            } } catch (failure: ApiFailure) {
                 endpointRejected = failure.code == "PUSH_ENDPOINT_REJECTED"
                 if (failure.retryable) PushRegistrationPolicy.Outcome.RETRY else PushRegistrationPolicy.Outcome.REFUSED
             } catch (_: Exception) {
