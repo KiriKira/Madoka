@@ -6,7 +6,7 @@
 
 优先检查 Homura 使用的设备配置和实际录音源。Madoka 用户讲话时，Homura 把这路音频注入蜂窝上行。对标记为播放会泄漏到采集的机型，Homura 逐个 20 ms 帧比较蜂窝采集音量与估算的回声。低于双讲门限时它向 Madoka 发送静音。较轻的辅音和词尾可能被交替截掉，RTP 仍然正常到达。msm8930 和 sm6150 的内置配置已经关闭此门控，需按实际使用的配置判断。[Homura 判断及计数](https://github.com/KiriKira/Homura/blob/0866675c4127852c65aeeb55aa5664b4c288a54c/app/src/main/java/com/callagent/gateway/audio/CellularAudioSession.kt#L970)
 
-用同一手机和网络，分别做音乐测试来电和真实 SIM 来电。两种通话都依次进行对方单独发声、Madoka 一侧单独发声、双方重叠发声，每段 10 秒以上，标记时间和听到缺字的位置。用听筒和有线耳机各做一次。测试来电绕过蜂窝采集，可覆盖 Madoka 的播放和中继路径。真实通话按同一时间窗比较：
+用户在内置音乐测试来电中暂未听到断续，之前报告的现象发生在真实通话的双方同时讲话时。音乐测试经过 WebRTC 和 Madoka 播放链路，但绕过 Homura 的蜂窝音频采集，因此优先查真实 SIM 通话的采集源、逐帧回声判断和 PCM 送帧。实际根因仍需对齐同一次断续前后的两端日志。对比这通电话中单讲和双讲片段的计数增量：
 
 - Homura 的原始采集电平仍有语音，双讲时 `gates:echo` 增量陡升，Madoka 的 `concealed_pct` 和丢包保持低位，优先处理网关误判。验证纯下行采集的机型可绕过门控；有真实回灌的机型应单独评估带迟滞的双讲检测和渐变衰减，同时检查回声是否变响。
 - 若 Madoka 的 `rx_loss_pct`、`concealed_pct` 或缓冲延迟同步上升，比较 UDP 直连与实际选中的 TURN 路径。若网络指标稳定而 Homura 的 `pcm_underruns` 持续增加，检查旧机 PCM 送帧时序。若仅免提复现，再检查 Madoka 设备音效与路由。采集计数和电平即可，无需记录通话内容。[现有质量日志](relay-source-foundation.md)
@@ -22,6 +22,8 @@
 服务层给网络丢失 30 秒宽限。媒体层另有已连接后断连 10 秒、信令读取失败约 10 秒的退出路径，ICE FAILED 可直接终止。当前只接受 generation 1，首次连通后封存本代本地候选。Wi-Fi 切蜂窝时，服务还在等待，媒体腿可能已结束。[媒体轮询](../rtcmedia/src/main/java/com/callagent/rtcmedia/RtcAudioSession.kt) · [ICE 回调](../rtcmedia/src/main/java/com/callagent/rtcmedia/NativePeer.kt)
 
 先对 Wi-Fi/蜂窝互切、短时丢包和仅信令不可达分别测量首个丢音到恢复的时长、授权有效期和结束原因。将明确撤权、远端挂断和可恢复的传输错误分开处理，在有效授权窗口内统一恢复期限。需要更换地址才能恢复时，两端和信令协议必须共同支持按代隔离的 ICE restart。旧代候选不可复用。调整抖动缓冲和 Opus 参数前，先看实际路径上的隐藏采样占比与缓冲延迟，以免改善丢字却增加交谈延迟。
+
+审阅弱网恢复时核对了现有的省电修复。已注册网络监听且离线空闲时，RtcCallEngine 会释放持续唤醒锁并跳过请求。兼容模式的空闲轮询在连续失败时退避至最长 60 秒；Reception v2 的空闲兜底是 15 分钟的非唤醒定时器。WebSocket 短暂连上又掉线会沿用带抖动的退避，连接稳定至少 60 秒后才在重连路径重置计数。弱网通话的恢复可以由当前媒体会话合并事件并在结束时取消任务，沿用这些待机行为。以上是源码审阅结果，实际耗电未在本次测量。[RTC 调度](../app/src/main/java/com/callagent/host/calls/RtcCallEngine.kt#L157) · [重连退避](../app/src/main/java/com/callagent/host/background/HostBackgroundService.kt#L629)
 
 ## 合并后的媒体许可
 
