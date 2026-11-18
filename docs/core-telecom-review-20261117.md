@@ -9,10 +9,10 @@
 
 ## 1. 总体结论
 
-`8d9841b` 基本照修订计划实现，审阅中没有发现会直接造成串音或残留系统通话的代码错误。与计划一致的部分：
+`8d9841b` 基本照修订计划实现，以下为 11 月 17 日的审阅结论。11 月 18 日复审核实了静音订阅失效以及断开超时仍触发清理的路径，另发现初始化与保持并发的问题，已列入[修复计划](core-telecom-fix-plan.md)。与计划一致的部分：
 
 - Core-Telecom 1.0.1，工具链未动；显式传能力位；外呼地址固定为 `gsm2sip:<callId>`；断开原因只用 LOCAL／REMOTE／REJECTED／MISSED。
-- 通话协程由进程级持有，先等平台断开结果再停前台服务和 `stopSelf`；注册中挂断会等注册结果，不以取消 `addCall` 代替断开。
+- 通话协程由进程级持有，正常成功路径先等平台断开结果再停前台服务和 `stopSelf`；注册中挂断会等注册结果，不以取消 `addCall` 代替断开。
 - `registerAppWithTelecom` 每进程一次；只清理本包旧账户。
 - `CallAudioPermit` 把"授权"和"平台激活"取交集，终态不可恢复；系统保持同步暂停媒体，不排在 IO 队列后。`PlatformActivation` 用版本号防止迟到的激活结果覆盖保持。
 - 删除直接操作 AudioManager 的路径；距离传感器只在确认听筒时熄屏。
@@ -87,4 +87,4 @@
 
 说明：本地首轮默认构建中 `FullBackupTest` 失败一次，原因是 Robolectric 无法经代理下载 `android-all-instrumented:9` 运行时（与代码无关），重试后通过。另有一次本地 Core-Telecom 运行与另一个构建在同一目录并发执行而失败，结果作废，已顺序重跑。
 
-未做：模拟器、真机、instrumentation。P2 四项设备证据仍为空。
+默认 legacy 后端已在 CI 模拟器完成 UI 冒烟。本次未执行 Core-Telecom 通话的模拟器、真机及 instrumentation 验证，P2 四项设备证据仍为空。
