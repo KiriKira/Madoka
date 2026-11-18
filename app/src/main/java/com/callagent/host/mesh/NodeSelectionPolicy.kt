@@ -46,6 +46,21 @@ object NodeSelectionPolicy {
         observation.reachable && observation.gatewayOnline &&
             (observation.rttMillis ?: Long.MAX_VALUE) <= MAX_HEALTHY_RTT_MS
 
+    /**
+     * A node that failed its last probes (a home node seen from outside) is
+     * probed less often: 2, 4, 8 ... up to 30 minutes after the last attempt.
+     * Each probe of such a node only waits out a timeout. A network change
+     * probes every node at once, so coming home is noticed immediately.
+     */
+    fun resting(health: NodeHealth?, now: Long): Boolean {
+        val failures = health?.consecutiveFailures ?: return false
+        if (failures < 2 || health.checkedAt <= 0L) return false
+        val backoff = minOf(MAX_REST_MS, REST_BASE_MS shl minOf(failures - 2, 10))
+        return now - health.checkedAt in 0 until backoff
+    }
+    private const val REST_BASE_MS = 120_000L
+    private const val MAX_REST_MS = 30 * 60_000L
+
     fun record(previous: NodeHealth?, observation: NodeObservation, now: Long): NodeHealth {
         val before = previous ?: NodeHealth()
         val ok = healthy(observation)

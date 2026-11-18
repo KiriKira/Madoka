@@ -93,4 +93,22 @@ class NodeSelectionPolicyTest {
         assertFalse(failed.callReady)
         assertTrue(NodeSelectionPolicy.record(failed, ok.copy(callReady = true), now = 3).callReady)
     }
+
+    @Test fun aNodeThatKeepsFailingIsProbedLessOften() {
+        val minute = 60_000L
+        var health: NodeHealth? = null
+        assertFalse(NodeSelectionPolicy.resting(health, 0))
+        health = NodeSelectionPolicy.record(health, down, now = 1_000_000)
+        // One failure may be a blip: probe again on the normal schedule.
+        assertFalse(NodeSelectionPolicy.resting(health, 1_000_000 + minute))
+        health = NodeSelectionPolicy.record(health, down, now = 2_000_000)
+        assertTrue(NodeSelectionPolicy.resting(health, 2_000_000 + minute))
+        assertFalse(NodeSelectionPolicy.resting(health, 2_000_000 + 2 * minute))
+        repeat(20) { health = NodeSelectionPolicy.record(health, down, now = 3_000_000) }
+        assertTrue(NodeSelectionPolicy.resting(health, 3_000_000 + 29 * minute))
+        assertFalse("never more than 30 minutes", NodeSelectionPolicy.resting(health, 3_000_000 + 30 * minute))
+        // Back home: one success ends the rest.
+        health = NodeSelectionPolicy.record(health, ok, now = 4_000_000)
+        assertFalse(NodeSelectionPolicy.resting(health, 4_000_001))
+    }
 }

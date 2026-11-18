@@ -97,11 +97,16 @@ object NodeMonitor {
                     } else first
                 }
             }
-            val probes=nodes.filter{it.key !in cold}.associate{it.key to submit(it)}.toMutableMap()
+            // Failing non-active nodes rest between probes (see NodeSelectionPolicy.resting);
+            // a forced evaluation (network change) and a failing active node probe them.
+            val wall=System.currentTimeMillis()
+            val resting=if(force)emptySet() else nodes.filter{ it.key!=active && it.key !in cold &&
+                NodeSelectionPolicy.resting(previous[it.key],wall) }.map{it.key}.toSet()
+            val probes=nodes.filter{it.key !in cold && it.key !in resting}.associate{it.key to submit(it)}.toMutableMap()
             val observations=probes.mapValues{it.value.get()}.toMutableMap()
             if(active==null || observations[active]?.let(NodeSelectionPolicy::healthy)!=true){
-                nodes.filter{it.key in cold}.forEach{probes[it.key]=submit(it)}
-                cold.forEach{observations[it]=probes.getValue(it).get()}
+                nodes.filter{it.key in cold || it.key in resting}.forEach{probes[it.key]=submit(it)}
+                (cold+resting).forEach{observations[it]=probes.getValue(it).get()}
             }
             val updates=nodes.associate{node->node.key to if(node.key !in observations)previous.getValue(node.key)
                 else NodeSelectionPolicy.record(previous[node.key],observations.getValue(node.key),System.currentTimeMillis())}
