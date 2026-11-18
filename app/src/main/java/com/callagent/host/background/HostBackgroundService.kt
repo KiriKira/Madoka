@@ -458,6 +458,10 @@ class HostBackgroundService : Service() {
             if(socket!=null)closeWebSocket()
             CallRuntime.wakeChannelLive=true;setConnection("Live updates connected");return
         }
+        // The active node has no live control socket (another node is active,
+        // or it dropped): stop holding the previous one open as a wake channel,
+        // so an unused standby node's socket closes when idle.
+        com.callagent.rtcmedia.NodeControlSocket.unlisten("madoka-background")
         if (pushCovers(session)) {
             if (socket != null) {
                 com.callagent.host.data.StandbyDiagnostics.event("wss_push_covers")
