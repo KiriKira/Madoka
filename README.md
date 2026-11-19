@@ -51,15 +51,7 @@
 ./gradlew :app:assembleDebug :app:testDebugUnitTest --no-daemon --max-workers=2
 ```
 
-用自己的 fork 通过 GitHub Actions 出正式包（推送 `main` 发布预览版，打 `v*` 标签发布正式版）：
-
-| 配置 | 类型 | 用途 |
-| --- | --- | --- |
-| `GSM_RELEASE_KEYSTORE_BASE64` 等签名项、`GSM_RELEASE_CERT_SHA256` | Secrets / 变量 | 固定签名，用 `scripts/configure-release-signing.py` 一次性生成并写入 |
-| `GOOGLE_SERVICES_JSON_BASE64` | Secret（可选） | 你的 Firebase 项目的 `google-services.json`；不填则没有推送唤醒，退回长连接 |
-| `PUSH_RELAY_URL` | 变量（可选） | 你自己部署的 [Kyubey](https://github.com/KiriKira/Kyubey) 地址，须为 `https://` |
-
-本地构建时，把 `google-services.json` 放进 `app/`，并设环境变量 `MAHOGSM_PUSH_RELAY_URL` 即可。签名细节见 [docs/releases.md](docs/releases.md)。
+启用推送唤醒：把你的 Firebase 项目的 `google-services.json` 放进 `app/`，并设环境变量 `MAHOGSM_PUSH_RELAY_URL` 为你部署的 [Kyubey](https://github.com/KiriKira/Kyubey) 地址（须为 `https://`）。两者都不设也能构建，只是没有推送唤醒，会退回长连接。
 
 更多文档：[WebRTC 通话实现](docs/webrtc-implementation.md) · [多主机协同](docs/multi-host.md) · [多服务器节点](docs/mesh-nodes.md) · [短信备份与恢复](docs/sms-backup.md) · [后台运行与权限说明](docs/android-ui-and-background.md)
 
