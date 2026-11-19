@@ -32,9 +32,9 @@ class CallReadinessTest {
         assertEquals("服务器未启用通话（rtc_disabled）。", evaluate(server = false, reason = "rtc_disabled").blocker)
         assertEquals("服务器暂不可用（HTTP_503）。", evaluate(server = false, reason = "服务器暂不可用（HTTP_503）。").blocker)
         assertEquals("本机通话组件不可用。", evaluate(engine = false).blocker)
-        assertEquals("旧手机离线，暂时无法拨号。", evaluate(online = false).blocker)
+        assertEquals("Homura 离线，暂时无法拨号。", evaluate(online = false).blocker)
         assertEquals("请选择用于拨号的 SIM 卡。", evaluate(selected = null).blocker)
-        assertEquals("SIM 1 需在旧手机上确认后才能使用。", evaluate(selected = line.copy(identityVerified = false)).blocker)
+        assertEquals("SIM 1 需在 Homura 上确认后才能使用。", evaluate(selected = line.copy(identityVerified = false)).blocker)
         assertEquals("SIM 配置已变化，正在同步…", evaluate(revision = 5).blocker)
     }
 

@@ -61,19 +61,19 @@ object GatewayStatusPresenter {
                 return GatewayStatus("无法连接服务器", server.reason, Tone.WARNING,
                     online = false, voiceReady = false, sims = emptyList())
             }
-            return GatewayStatus("尚未连接旧手机", "旧手机完成配对并上报后会显示在这里。", Tone.UNKNOWN,
+            return GatewayStatus("尚未连接 Homura", "Homura 完成配对并上报后会显示在这里。", Tone.UNKNOWN,
                 online = false, voiceReady = false, sims = emptyList())
         }
         val lastSeen = gateway.lastSeenAt?.let(::parseInstant)
         val online = isOnline(gateway, lastSeen, nowMillis)
-        val name = gateway.deviceName.ifBlank { "旧手机" }
+        val name = gateway.deviceName.ifBlank { "SIM 网关" }
         val voiceReady = online && gateway.voiceReady == true
         if (!online && server !is ServerLink.Connected) {
             // A stale snapshot only means this phone has not heard from the
             // server lately, not that the old phone went away.
-            val seen = lastSeen?.let { "旧手机最后上报 ${relativeTime(it.toEpochMilli(), nowMillis, zone)}" }
+            val seen = lastSeen?.let { "Homura 最后上报 ${relativeTime(it.toEpochMilli(), nowMillis, zone)}" }
             val detail = when (server) {
-                is ServerLink.Unreachable -> listOfNotNull("${server.reason}，无法确认旧手机状态", seen)
+                is ServerLink.Unreachable -> listOfNotNull("${server.reason}，无法确认 Homura 状态", seen)
                 else -> listOfNotNull("正在连接服务器…", seen)
             }.joinToString(" · ")
             return GatewayStatus("$name · 状态未知", detail, Tone.WARNING, online = false, voiceReady = false,
@@ -87,7 +87,7 @@ object GatewayStatusPresenter {
             ).joinToString(" · ")
         } else {
             val seen = lastSeen?.let { "最后在线 ${relativeTime(it.toEpochMilli(), nowMillis, zone)}" } ?: "从未上报"
-            "$seen · 新短信任务会排队，旧手机恢复后发送"
+            "$seen · 新短信任务会排队，Homura 恢复后发送"
         }
         val tone = when {
             !online -> Tone.ERROR
@@ -113,9 +113,9 @@ object GatewayStatusPresenter {
         val title = listOfNotNull(line.label.takeIf { it.isNotBlank() }, operator?.takeIf { it != line.label })
             .joinToString(" · ").ifBlank { slot }
         val stateProblem = when {
-            line.state == "pending_local_confirmation" -> "待旧手机确认"
+            line.state == "pending_local_confirmation" -> "待 Homura 确认"
             line.state == "removed" -> "已移除"
-            !line.identityVerified || line.state == "unverified" -> "需在旧手机重新确认"
+            !line.identityVerified || line.state == "unverified" -> "需在 Homura 重新确认"
             line.state != "active" -> line.state
             else -> null
         }

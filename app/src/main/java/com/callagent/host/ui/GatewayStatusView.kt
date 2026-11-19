@@ -78,7 +78,7 @@ class GatewayStatusView(
         }
         if (!compact) {
             if (status.sims.isEmpty()) {
-                column.addView(text("暂无已绑定的 SIM。请在旧手机上同步并确认 SIM。",
+                column.addView(text("暂无已绑定的 SIM。请在 Homura 上同步并确认 SIM。",
                     MaterialR.style.TextAppearance_Material3_BodyMedium, MaterialR.attr.colorOnSurfaceVariant)
                     .apply { setPadding(0, dp(10), 0, 0) })
             }

@@ -74,7 +74,7 @@ object NodeSelectionPolicy {
             callReady = ok && observation.callReady,
             issue = observation.issue ?: when {
                 !observation.reachable -> "无法连接"
-                !observation.gatewayOnline -> "旧手机不在线"
+                !observation.gatewayOnline -> "Homura 不在线"
                 !ok -> "延迟过高"
                 else -> null
             }
