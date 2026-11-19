@@ -109,9 +109,9 @@ object HostNodes {
             throw NodeSetupFailure("当前服务器版本不支持多节点，请先升级服务器")
         }
         val installId = awaitInstallId(installIds(ApiClient(active.apiBaseUrl, activeStore)), expected = null, onWaiting)
-            ?: throw NodeSetupFailure("旧手机还没有向当前服务器报告身份。请确认旧手机应用已打开并联网后再试")
+            ?: throw NodeSetupFailure("Homura 还没有向当前服务器报告身份。请确认 Homura 已打开并联网后再试")
         if (existing.installId != null && existing.installId != installId) {
-            throw NodeSetupFailure("当前服务器上的旧手机与节点列表记录的不是同一台")
+            throw NodeSetupFailure("当前服务器上的 Homura 与节点列表记录的不是同一台")
         }
 
         val key = UUID.randomUUID().toString()
@@ -121,10 +121,10 @@ object HostNodes {
         try {
             val seen = awaitInstallId(installIds(ApiClient(paired.apiBaseUrl, nodeStore)), expected = installId, onWaiting)
             if (seen == null) {
-                throw NodeSetupFailure("旧手机还没有加入这个服务器。请先让旧手机扫码或在“其他节点”里添加它，再重试")
+                throw NodeSetupFailure("Homura 还没有加入这个服务器。请先让 Homura 扫码或在“其他节点”里添加它，再重试")
             }
             if (seen != installId) {
-                throw NodeSetupFailure("这个服务器上是另一台旧手机，不能加入同一个节点列表")
+                throw NodeSetupFailure("这个服务器上是另一台 SIM 网关，不能加入同一个节点列表")
             }
         } catch (failure: Exception) {
             runCatching { ApiClient(paired.apiBaseUrl, nodeStore).revoke() }

@@ -35,14 +35,14 @@ object CallReadiness {
             // which reports its own failure if the server is really down.
             !gatewayOnline && server is ServerLink.Unreachable -> "无法连接服务器，暂时无法拨号。请检查本机网络或服务器。"
             !gatewayOnline && server is ServerLink.Checking -> "正在连接服务器…"
-            !gatewayOnline -> "旧手机离线，暂时无法拨号。"
+            !gatewayOnline -> "Homura 离线，暂时无法拨号。"
             line == null -> "请选择用于拨号的 SIM 卡。"
-            !line.canSend -> "SIM ${line.slotIndex + 1} 需在旧手机上确认后才能使用。"
+            !line.canSend -> "SIM ${line.slotIndex + 1} 需在 Homura 上确认后才能使用。"
             gatewayRevision != line.mappingRevision -> "SIM 配置已变化，正在同步…"
             else -> null
         }
         val hint = if (blocker == null && gatewayVoiceReady == false) {
-            "旧手机通话尚未就绪，呼叫可能失败；请在旧手机完成“远程通话”设置。"
+            "Homura 通话尚未就绪，呼叫可能失败；请在 Homura 完成“远程通话”设置。"
         } else null
         return Result(blocker, hint)
     }

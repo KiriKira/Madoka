@@ -535,7 +535,7 @@ class MainActivity : AppCompatActivity() {
                 mainHandler.post { progress.setMessage("正在连接 $label 并验证…") }
                 runCatching {
                     HostNodes.add(app, entry.serverUrl, entry.pairingCode, deviceName,
-                        onWaiting = { mainHandler.post { progress.setMessage("正在等待旧手机加入 $label（最多约 45 秒）…") } })
+                        onWaiting = { mainHandler.post { progress.setMessage("正在等待 Homura 加入 $label（最多约 45 秒）…") } })
                 }
                     .fold(
                         onSuccess = { node -> HostNodes.catchUpSilently(app, node); "$label：已加入" },
@@ -1218,7 +1218,7 @@ class MainActivity : AppCompatActivity() {
             }
             fillPairedDevices(devices)
             content.addView(devices)
-            content.addView(HostUi.groupHeader(this, "旧手机与 SIM 卡"))
+            content.addView(HostUi.groupHeader(this, "SIM 网关与 SIM 卡"))
             content.addView(gatewayStatusCard(compact = false))
             content.addView(HostUi.tile(this, HostUi.Position.SINGLE, "解除此手机配对",
                 icon = R.drawable.ic_ui_link_off,
@@ -1341,7 +1341,7 @@ class MainActivity : AppCompatActivity() {
             }))
         if (session != null) {
             content.addView(HostUi.tile(this, HostUi.Position.MIDDLE, "测试通话",
-                summary = "旧手机打来一通播放音乐的虚拟来电，用来检查接通速度和音质；不占用 SIM 卡",
+                summary = "Homura 打来一通播放音乐的虚拟来电，用来检查接通速度和音质；不占用 SIM 卡",
                 icon = R.drawable.call_ui_phone,
                 onClick = { requestTestCall() }).apply { id = R.id.settings_test_call })
         }
@@ -1532,7 +1532,7 @@ class MainActivity : AppCompatActivity() {
         }
         val serverField = inputField("节点服务器地址（http:// 或 https://）", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
         val codeField = inputField("该服务器的一次性配对码", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
-        form.addView(body("先在旧手机的“其他节点”里添加同一台服务器，再在该服务器上为此手机生成配对码。", selectable = false))
+        form.addView(body("先在 Homura 的“其他节点”里添加同一台服务器，再在该服务器上为此手机生成配对码。", selectable = false))
         form.addView(serverField)
         form.addView(codeField)
         MaterialAlertDialogBuilder(this)
@@ -1553,7 +1553,7 @@ class MainActivity : AppCompatActivity() {
                 nodeExecutor.execute {
                     val result = runCatching {
                         HostNodes.add(app, url, code, deviceName,
-                            onWaiting = { mainHandler.post { progress.setMessage("正在等待旧手机加入这个服务器（最多约 45 秒）…") } })
+                            onWaiting = { mainHandler.post { progress.setMessage("正在等待 Homura 加入这个服务器（最多约 45 秒）…") } })
                     }
                     // History catch-up runs after the result is shown; it is silent and best-effort.
                     result.getOrNull()?.let { node ->
@@ -3184,13 +3184,13 @@ class MainActivity : AppCompatActivity() {
             val message = try {
                 val reply = ApiClient(expectedSession.apiBaseUrl, sessionStore).requestTestCall()
                 com.callagent.host.data.HostRunLog.add("RTC", "test_call requested request=${reply.optString("request_id").take(8)} gateway=${reply.optString("gateway_id").take(8)}")
-                "已请求测试通话，旧手机将在几秒内来电"
+                "已请求测试通话，Homura 将在几秒内来电"
             } catch (failure: ApiFailure) {
                 com.callagent.host.data.HostRunLog.add("RTC", "test_call request_failed status=${failure.httpStatus} code=${failure.code}")
                 when (failure.code) {
                     "TEST_CALL_UNSUPPORTED" -> "当前服务器节点不支持测试通话，请先升级服务器"
-                    "GATEWAY_BUSY" -> "旧手机正在通话，或已有一次测试通话在进行"
-                    "GATEWAY_UNAVAILABLE" -> "旧手机离线或通话功能未就绪"
+                    "GATEWAY_BUSY" -> "Homura 正在通话，或已有一次测试通话在进行"
+                    "GATEWAY_UNAVAILABLE" -> "Homura 离线或通话功能未就绪"
                     else -> "测试通话请求失败（${failure.code.ifBlank { failure.httpStatus.toString() }}）"
                 }
             } catch (failure: Exception) {
@@ -3286,7 +3286,7 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (mappingChanged) {
                         selectedSimId = null
-                        statusMessage = "旧手机的 SIM 绑定已变化，发送前请重新选择 SIM。"
+                        statusMessage = "Homura 的 SIM 绑定已变化，发送前请重新选择 SIM。"
                     }
                     if (statusMessage == REFRESHING_STATUS || statusMessage.startsWith(OFFLINE_STATUS_PREFIX)) statusMessage = ""
                     gateway = database.loadGateway() ?: gateway
@@ -3318,7 +3318,7 @@ class MainActivity : AppCompatActivity() {
                         updateDialButtonState()
                     } else {
                         serverLink = ServerLink.Unreachable(serverUnreachableReason(failure))
-                        statusMessage = "$OFFLINE_STATUS_PREFIX，当前显示缓存的旧手机、SIM 和短信。${apiFailureText(failure)}"
+                        statusMessage = "$OFFLINE_STATUS_PREFIX，当前显示缓存的 SIM 网关、SIM 和短信。${apiFailureText(failure)}"
                         // Cached data did not change; rebuilding the whole screen every
                         // failed 30 s sync would flicker and drop taps. Only re-age the status card.
                         refreshGatewayStatusCard()
@@ -3636,7 +3636,7 @@ class MainActivity : AppCompatActivity() {
                 selectedSimId = null
                 navigation = HostNavigationState()
                 composerTransfer = null
-                statusMessage = "已配对，正在载入旧手机状态…"
+                statusMessage = "已配对，正在载入 Homura 状态…"
                 showDashboard()
                 adaptiveHost?.post { if (hasWindowFocus()) ensurePairedRuntimeStarted() }
                 if (sessionStore.read()?.sameSessionInstance(paired) == true) {
@@ -4398,4 +4398,4 @@ class MainActivity : AppCompatActivity() {
 }
 
 /** The server answered, but this account has no paired old phone yet. */
-private class NoPairedGateway : IOException("此账户还没有配对旧手机网关")
+private class NoPairedGateway : IOException("此账户还没有配对 SIM 网关")

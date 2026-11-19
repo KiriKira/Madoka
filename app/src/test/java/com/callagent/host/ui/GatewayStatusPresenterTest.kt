@@ -67,7 +67,7 @@ class GatewayStatusPresenterTest {
         assertFalse(unreachable.online)
         assertEquals(Tone.WARNING, unreachable.tone)
         assertEquals("旧小米 · 状态未知", unreachable.headline)
-        assertEquals("无法连接服务器，无法确认旧手机状态 · 旧手机最后上报 10 分钟前", unreachable.detail)
+        assertEquals("无法连接服务器，无法确认 Homura 状态 · Homura 最后上报 10 分钟前", unreachable.detail)
         assertNull(unreachable.sims.single().signalLevel)
 
         val checking = GatewayStatusPresenter.present(stale, listOf(line(0)), now, ZoneOffset.UTC, server = ServerLink.Checking)
@@ -90,7 +90,7 @@ class GatewayStatusPresenterTest {
             listOf(line(0, state = "unverified", verified = false), line(1, service = "out_of_service", radio = null)),
             now, ZoneOffset.UTC)
         assertEquals("电量 80% · 充电中 · 仅短信", status.detail)
-        assertEquals("需在旧手机重新确认 · LTE", status.sims[0].detail)
+        assertEquals("需在 Homura 重新确认 · LTE", status.sims[0].detail)
         assertFalse(status.sims[0].usable)
         assertNull(status.sims[0].signalLevel)
         assertEquals(Tone.WARNING, status.sims[1].tone)

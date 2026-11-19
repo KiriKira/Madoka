@@ -18,7 +18,7 @@ class NodeSelectionPolicyTest {
         assertFalse(NodeSelectionPolicy.healthy(ok.copy(gatewayOnline = false)))
         assertFalse(NodeSelectionPolicy.healthy(down))
         assertEquals("延迟过高", NodeSelectionPolicy.record(null, ok.copy(rttMillis = 9_000), 1).issue)
-        assertEquals("旧手机不在线", NodeSelectionPolicy.record(null, ok.copy(gatewayOnline = false), 1).issue)
+        assertEquals("Homura 不在线", NodeSelectionPolicy.record(null, ok.copy(gatewayOnline = false), 1).issue)
     }
 
     @Test
