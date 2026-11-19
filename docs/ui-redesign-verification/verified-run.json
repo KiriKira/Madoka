@@ -1,18 +1,18 @@
 {
   "schema_version": 1,
   "overall": "pass",
-  "generated_at_utc": "2026-11-18T07:38:51Z",
-  "source_commit": "6ebb07d8256eb93b0503f5f5a85a760e19e22073",
+  "generated_at_utc": "2026-11-19T09:50:12Z",
+  "source_commit": "fca178dfb1a722e8b46febce1c3ebea62ac95825",
   "repository": "KiriKira/Madoka",
-  "run_id": "44258931173",
+  "run_id": "44498068532",
   "artifact": {
-    "id": "14408116107",
-    "digest": "sha256:d6d502ffbc823f503c4de9570f424a4ecb67f5df14a7105547199e019676e2da"
+    "id": "14517525579",
+    "digest": "sha256:f532cf5dc73b45025514d133ce9aa5f523118006076bd232db7ea7869004cd1e"
   },
   "apk": {
     "filename": "app-debug.apk",
-    "sha256": "afec5fc3bdb606bc5fddc1f6eb4e66eb452cd99710d193e2990ecec3efc1104a",
-    "size_bytes": 22516128
+    "sha256": "8be4312a3a2b4a2f75289bb75d60c52be7eda413ab5470c1989c0a3623a38ca5",
+    "size_bytes": 22532512
   },
   "results": {
     "unpaired": {
@@ -29,22 +29,22 @@
   "result_files": [
     {
       "path": "results.json",
-      "sha256": "e119a8b18830c6ab92539d55d0c14ab48167a3f2cde27b756d39a282fb9f7638",
+      "sha256": "268ca9ff973fb1d4b62f720b88946b07411980941580827911fa197e91de8ed8",
       "size_bytes": 9383
     },
     {
       "path": "screenshot_manifest.json",
-      "sha256": "579db39efc51dc5fe771206d3b4bc88a0abf129628ffa353e1b2786b213c7498",
-      "size_bytes": 19707
+      "sha256": "6d805e888775d5b997555a9a8ae0c12f0c218514a87cd58ea7896723aaa6fa8d",
+      "size_bytes": 19940
     },
     {
       "path": "paired-fixture/results.json",
-      "sha256": "17d074786011e63b86a15da212a895a5187124a60cb52884a5752d99140bd65f",
+      "sha256": "9219b0fa526a30184ba5f34247fd0169b3d8e17145e7f2037a399d8e10cd379d",
       "size_bytes": 18791
     },
     {
       "path": "paired-fixture/fixture_manifest.json",
-      "sha256": "8e619de920e214e7c87373671b0caa1348fd5f7e90e749f169e18ba5b94f0396",
+      "sha256": "5d8588eb9d18d547dd83de955ecbdccf2a7356cfdf4887bbb909f8b6b920373a",
       "size_bytes": 15922
     }
   ],
@@ -56,8 +56,8 @@
       "path": "images/host_navigation_initial.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 104487,
-      "sha256": "7b3172f3fa2546b61137d6f21a8a870a05efce430cde13d5772487dc40b9fc38"
+      "size_bytes": 106463,
+      "sha256": "edd3ab92a0148d9c9962366838fd849051452530410028b8139a8128335fb6fd"
     },
     {
       "category": "电话与拨号",
@@ -66,8 +66,8 @@
       "path": "images/host_call_history.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 103308,
-      "sha256": "858354cea633430b8925d4e1aac3e2a321a8d5964e078bfc3bef2eb2d2b3bf39"
+      "size_bytes": 103380,
+      "sha256": "5ef079cbbb8cb13acc76acaeb57bb675981a27f99c4894d981b426c36cfbd9a5"
     },
     {
       "category": "电话与拨号",
@@ -76,8 +76,8 @@
       "path": "images/host_dialpad.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 141258,
-      "sha256": "ab87a2e6f3e6ac2b8741b3ee099cdb13ebb63b9452e2fdaf8ef9860e5dc3247b"
+      "size_bytes": 141318,
+      "sha256": "2a8127e56e7d9794d7024002c46db644b79475e3bb9ff3db547db0e35118c1c4"
     },
     {
       "category": "短信",
@@ -86,8 +86,8 @@
       "path": "images/host_sms_thread_list.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 105336,
-      "sha256": "aa8f3f5fef1b00560edf0a9d04af64e4571af87d385d1846d14f92d3b583a875"
+      "size_bytes": 105396,
+      "sha256": "06be81638a6e21f418e83eb3df765df89c4751449e95ad4130b8cb661b240a18"
     },
     {
       "category": "设置",
@@ -96,8 +96,8 @@
       "path": "images/host_settings_tab.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 163800,
-      "sha256": "932bf38b66c4831acb3ae2ff189fc1052c993eca1c82ad26a646c944ee4f2b2f"
+      "size_bytes": 163806,
+      "sha256": "90a81c639c7702e03e900c7767d4a4654a62473a69bd6c3e1ee672abfa66e5f8"
     },
     {
       "category": "设置",
@@ -106,8 +106,8 @@
       "path": "images/host_settings_backup_entry.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 184702,
-      "sha256": "31582fc2bc8ab76ee153eb1d7b45109e431981e13e7cc5baa5bbf2f051f9b82b"
+      "size_bytes": 184181,
+      "sha256": "018c94c82949e755d519bed627acc3f0bb45c1a7dd80387c54a32db27382ef90"
     },
     {
       "category": "窗口适配",
@@ -116,8 +116,8 @@
       "path": "images/folded_ui.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 169046,
-      "sha256": "24aa37fd4eed188bb35244caf35bb6c42be50619eb6bb952f8d6028c53c381f7"
+      "size_bytes": 169658,
+      "sha256": "4f1ca3c6d924ecffab56080186b2db36edda17808b0bf7a5523755a737a703d6"
     },
     {
       "category": "窗口适配",
@@ -126,8 +126,8 @@
       "path": "images/unfolded_ui.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 178606,
-      "sha256": "4efc55ceab050306bc189f40f0ae304cbc3b0d16b4a4473add49e246af0ce9d2"
+      "size_bytes": 179240,
+      "sha256": "46475c2fd57244afb7df353f6b388133aef9594ecdde7f367fa7785f39768d21"
     },
     {
       "category": "窗口适配",
@@ -136,8 +136,8 @@
       "path": "images/hole_cutout_enabled.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 169029,
-      "sha256": "ff676586dab4caf91db7a1e226288aa9b86494a824a3fff97a4573099eee0903"
+      "size_bytes": 166965,
+      "sha256": "dfa4b9c4d8c5d478825c37c44f6d69768cf6d30c73c8bb859010d14efcbebe89"
     },
     {
       "category": "短信备份",
@@ -146,8 +146,8 @@
       "path": "images/main-backup-entry-host.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 179167,
-      "sha256": "d325c145fa5c00ec48230c492e25501826e5f3a82915db9fdaac6c67f9434a10"
+      "size_bytes": 177121,
+      "sha256": "d48214d548ba8c134a1f99f9c4abc86f6a2939377fc163262fdef5e2e5c2b4f1"
     },
     {
       "category": "短信备份",
@@ -156,8 +156,8 @@
       "path": "images/backup-overview.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 238525,
-      "sha256": "d580c5326be6466e3a64ee08581592df23c4c2589fbe0c239265d143a73506b0"
+      "size_bytes": 235971,
+      "sha256": "4293608cc37c4e951ede587c02cafa925ef690e22bbe3346dbe4b0ecae0d4d3e"
     },
     {
       "category": "短信备份",
@@ -166,8 +166,8 @@
       "path": "images/backup-rotation-landscape.png",
       "width": 2208,
       "height": 1768,
-      "size_bytes": 234355,
-      "sha256": "eacd8a44879202a3ed0166732423d21eb953d30db4357fbef7fa87ed351c7c87"
+      "size_bytes": 234536,
+      "sha256": "c954cdb104fc0a285e3cd517985ce875fb4db206605df1ef11b598b0bf7729ea"
     },
     {
       "category": "短信备份",
@@ -176,8 +176,8 @@
       "path": "images/backup-rotation-portrait.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 237685,
-      "sha256": "aaff5314f82a790faf07db5aabf78ce1971e303f0171aadc0dc46dfd21e50c65"
+      "size_bytes": 237652,
+      "sha256": "614843fd1c044e965f0f70aa6fb179a81591c1670af033f619acc356ede84e94"
     },
     {
       "category": "短信备份",
@@ -186,8 +186,8 @@
       "path": "images/backup-folded.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 249540,
-      "sha256": "e8d8dfa5768f608dce367162df498112566efb4b1cb8feacaddbee25a6fe28f0"
+      "size_bytes": 249506,
+      "sha256": "7d3942e4191caea8d78705ce4b1646059e0237690d60fbf07eec0304f81158f9"
     },
     {
       "category": "短信备份",
@@ -196,8 +196,8 @@
       "path": "images/backup-unfolded.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 237685,
-      "sha256": "aaff5314f82a790faf07db5aabf78ce1971e303f0171aadc0dc46dfd21e50c65"
+      "size_bytes": 237652,
+      "sha256": "614843fd1c044e965f0f70aa6fb179a81591c1670af033f619acc356ede84e94"
     },
     {
       "category": "短信备份",
@@ -206,8 +206,8 @@
       "path": "images/backup-cutout.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 237685,
-      "sha256": "aaff5314f82a790faf07db5aabf78ce1971e303f0171aadc0dc46dfd21e50c65"
+      "size_bytes": 237652,
+      "sha256": "614843fd1c044e965f0f70aa6fb179a81591c1670af033f619acc356ede84e94"
     },
     {
       "category": "短信备份",
@@ -216,8 +216,8 @@
       "path": "images/backup-import-preview.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 259543,
-      "sha256": "5047e7ca4bf374a4323018db25daa106828c8f96f90777a446fc8167b0c2e7fd"
+      "size_bytes": 259509,
+      "sha256": "b4e293c46f88ca29719d6cbe6867e433755b9bc5cb1e6719a037d08bc8ca73dc"
     },
     {
       "category": "短信备份",
@@ -226,8 +226,8 @@
       "path": "images/backup-imported-history.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 281553,
-      "sha256": "2125bdbec370e96c497b5dd8548f07ef18a7a7a700df1b506e7536d2ee20c94d"
+      "size_bytes": 280751,
+      "sha256": "527de9be07a5bb6321dbddbd56badc63e1ba2cca5c980b4b7b11f044535f7737"
     },
     {
       "category": "配对数据界面",
@@ -236,8 +236,8 @@
       "path": "images/paired-fixture/paired_three_tabs.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 145271,
-      "sha256": "53d9381e9cfa7f49d9ac36f522ed850d10e05255f4ee15f7693a8b61959ff94f"
+      "size_bytes": 146052,
+      "sha256": "0b28e86f0b39adcdb2d64f8ee6034e2325e31e67fe679e96a0135312456b4880"
     },
     {
       "category": "配对数据界面",
@@ -246,8 +246,8 @@
       "path": "images/paired-fixture/paired_call_history.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 138463,
-      "sha256": "6ead0cb575361928e0b997a42f88d81bde34430cee210f5895a57084ea79baf0"
+      "size_bytes": 138990,
+      "sha256": "da8225c1829350bf846fab57c018c6c3b4722ec66bad9801ff37e8a45b029907"
     },
     {
       "category": "配对数据界面",
@@ -256,8 +256,8 @@
       "path": "images/paired-fixture/paired_dialpad_from_history.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 152936,
-      "sha256": "2c8a2a96da7451971bc53c22e10f695b1ab2989e2ae11fde325b4c63636c0058"
+      "size_bytes": 153051,
+      "sha256": "55a4ea269ba06b664d42b4a749451d0fe495033fa4a58d9eaae960e67676db4a"
     },
     {
       "category": "配对数据界面",
@@ -266,8 +266,8 @@
       "path": "images/paired-fixture/paired_dialpad.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 152936,
-      "sha256": "2c8a2a96da7451971bc53c22e10f695b1ab2989e2ae11fde325b4c63636c0058"
+      "size_bytes": 153051,
+      "sha256": "55a4ea269ba06b664d42b4a749451d0fe495033fa4a58d9eaae960e67676db4a"
     },
     {
       "category": "配对数据界面",
@@ -276,8 +276,8 @@
       "path": "images/paired-fixture/paired_sms_threads.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 183386,
-      "sha256": "047c155c4e5cc76b7f9940dcc5f303ea27df7680136dc282e1bdd238ea4a9b21"
+      "size_bytes": 184011,
+      "sha256": "6ab7e5dd178b72de69d9041cd5e31d7cc913fb62d07947a0705077bc96d24383"
     },
     {
       "category": "配对数据界面",
@@ -286,8 +286,8 @@
       "path": "images/paired-fixture/paired_sms_threads_folded.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 168994,
-      "sha256": "e0d2789a0cd9bded7d402943753423a7f2ddf66fd49f61c861bd7929422286aa"
+      "size_bytes": 168883,
+      "sha256": "21574bb8dfaeab0d4823d107488295c6bf3311e3aa18a1e3f10a0f9c22693ac0"
     },
     {
       "category": "配对数据界面",
@@ -296,8 +296,8 @@
       "path": "images/paired-fixture/paired_sms_threads_unfolded.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 183503,
-      "sha256": "ca075d6b2aea30368e93c3c994de733c265dbe73885eaf3851eb585d742669bd"
+      "size_bytes": 183485,
+      "sha256": "957e17c3310e58cc94562a727de5075a371c810d1c6201984b0ecd69b65aeaaf"
     },
     {
       "category": "配对数据界面",
@@ -306,8 +306,8 @@
       "path": "images/paired-fixture/paired_sms_conversation.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 79365,
-      "sha256": "1ce15bb24d2e6601b52d8eb0f7975a32f742b6cbb02ef7059b909fe20e09b413"
+      "size_bytes": 78894,
+      "sha256": "eb35cc1ddffd2575f9271adabcb14c008da6e649c7c076ba5346b37a1c153ca3"
     },
     {
       "category": "配对数据界面",
@@ -316,8 +316,8 @@
       "path": "images/paired-fixture/paired_new_message.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 81828,
-      "sha256": "613a395404fc5e8db754df7046c11e5596f9574aaafe7bf2351b4f40946cd734"
+      "size_bytes": 81347,
+      "sha256": "43871937e5b5cd11992a352ac0a4e2399d678ddc2941acc33243065dd7708d2c"
     },
     {
       "category": "配对数据界面",
@@ -326,8 +326,8 @@
       "path": "images/paired-fixture/paired_new_message_sim_b.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 82412,
-      "sha256": "10500f22ad1f49bcdab58c2719a04d0d729330e7fd856786e712e91ad1f375a4"
+      "size_bytes": 81922,
+      "sha256": "d65c3b33d62a975e5659b4dd316b47c908690bc1a4b578fff05b085f0b16bd99"
     },
     {
       "category": "配对数据界面",
@@ -336,8 +336,8 @@
       "path": "images/paired-fixture/paired_new_message_landscape.png",
       "width": 2208,
       "height": 1768,
-      "size_bytes": 168883,
-      "sha256": "89249a9e491c02f472cd6aa4d03ee3b55f04562fee5ca253a57a665178e3c46d"
+      "size_bytes": 169999,
+      "sha256": "9b0eb47e0eb15fbeb72825fe4f21ed43070f12fb3dc7f02d998bfbf02ac85ae2"
     },
     {
       "category": "配对数据界面",
@@ -346,8 +346,8 @@
       "path": "images/paired-fixture/paired_new_message_folded.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 165096,
-      "sha256": "fab9c06e37baa91f6a0320bf9795aaf98f5a519b4f52406e8d964b79cd21ae1e"
+      "size_bytes": 166096,
+      "sha256": "8a022987ef1de78ed4bf6e4c36e84f825111edac60cd02f263604ce5b347865b"
     },
     {
       "category": "配对数据界面",
@@ -356,8 +356,8 @@
       "path": "images/paired-fixture/paired_new_message_unfolded.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 163718,
-      "sha256": "0eddc62a7d5728cac90045d791d07ef1e080f78de43d98c864424542c228b8cd"
+      "size_bytes": 164774,
+      "sha256": "d3465d091ce3c81a1937cc5bdb19994de7bca251721838d9ee58bf39bb139356"
     },
     {
       "category": "配对数据界面",
@@ -366,8 +366,8 @@
       "path": "images/paired-fixture/paired_settings.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 151065,
-      "sha256": "76c8a07d8e1663e2b4bea2caaa25aa7fc92a2b4067b8fa0c870a1da25a71e3a1"
+      "size_bytes": 151768,
+      "sha256": "91115e4beb0dea967456237ba305d510fa7cb34aa6dcaa60a2d20850c39ef4ab"
     },
     {
       "category": "配对数据界面",
@@ -376,8 +376,8 @@
       "path": "images/paired-fixture/paired_settings_backup.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 225745,
-      "sha256": "14230a6c626bf4317ade3ba6909d6b612523f6523b1882600a4f827dbedecf58"
+      "size_bytes": 225352,
+      "sha256": "506df8918969b67a329f85a571d9bc7d6d732d5eaec6b44c136ae0989d5e4341"
     },
     {
       "category": "合成通话界面",
@@ -386,8 +386,8 @@
       "path": "images/paired-fixture/call-synthetic-dialing.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 53101,
-      "sha256": "1ff5669a4365931341f0cae1a18e86f72177309a9a89593de369e03a0c698664"
+      "size_bytes": 52145,
+      "sha256": "3dba15b0e6b9d7aaa95fa024639cf6e32fa91ead28b4ea6ab533aa0d37ed7b0c"
     },
     {
       "category": "合成通话界面",
@@ -396,8 +396,8 @@
       "path": "images/paired-fixture/call-synthetic-active.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 68109,
-      "sha256": "a05b8cc848ed44cb9fedeabe42d58e61f6e318cd24e5660785e745b6a010cb75"
+      "size_bytes": 67175,
+      "sha256": "c8a2e3e9a5dc0967fbefa86cf60ee37e5bef4fefae947f5001ee1297e2fd5f22"
     },
     {
       "category": "合成通话界面",
@@ -406,8 +406,8 @@
       "path": "images/paired-fixture/call-synthetic-keypad.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 103156,
-      "sha256": "e24134cdfa0ebf7c2cf3def788f24b306f43e6f8186f44c4dfe4e60d885f5fef"
+      "size_bytes": 102268,
+      "sha256": "37187392919190e28814ca505342e16984bfa862e511f8aa6c9d89c67b1d1dd4"
     },
     {
       "category": "合成通话界面",
@@ -416,8 +416,8 @@
       "path": "images/paired-fixture/call-synthetic-incoming.png",
       "width": 1768,
       "height": 2208,
-      "size_bytes": 65354,
-      "sha256": "2632e23525de56aec85965541ec600b0937290be410cf402b6f05a9c62f3fa04"
+      "size_bytes": 64437,
+      "sha256": "9ab82a0bbde64050fed144967ed0334bf0fe2f0c4a692a8652ef165cef7b403a"
     }
   ]
 }
