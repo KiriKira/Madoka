@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/Platform-Android-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android">
   <img src="https://img.shields.io/badge/Voice-WebRTC-blue?style=flat-square" alt="WebRTC">
   <img src="https://img.shields.io/badge/Version-1.0.1-ff69b4?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="MIT License">
 </p>
 
 外出不想带两台手机，或者有些 SIM 卡只放在固定设备上？**Madoka** 是 MahoGSM 系列的主力手机端 App。通过自建服务端（**SoulGem** / **GriefSeed**），你可以直接在日常使用的 Android 手机上远程接打电话、收发双卡短信，界面和原生电话、信息一样顺手。
@@ -42,17 +43,26 @@
 2. **安装并配对：** 从 [Releases](https://github.com/KiriKira/Madoka/releases) 下载 APK 安装，打开「设置」，填入服务器地址和 `client` 角色的一次性配对码（局域网或 Tailscale 内网可直接用 `http://`）。
 3. **开始使用：** 配对后自动开启后台同步与来电监听；麦克风权限仅在真正拨打或接听时才会申请。
 
-<details>
-<summary>🔧 自行构建与开发资料</summary>
+## 🔧 自行构建与发布
 
-需要 JDK 17 与 Android SDK Platform 35（包名 `com.callagent.host`，与历史版本签名一致可直接覆盖升级）：
+需要 JDK 17 与 Android SDK Platform 35。包名 `com.callagent.host`，签名与历史版本一致时可直接覆盖升级或回退。
 
 ```sh
 ./gradlew :app:assembleDebug :app:testDebugUnitTest --no-daemon --max-workers=2
 ```
 
-- [WebRTC 通话实现](docs/webrtc-implementation.md) · [多主机协同](docs/multi-host.md) · [多服务器节点](docs/mesh-nodes.md)
-- [短信备份与恢复](docs/sms-backup.md) · [后台运行与权限说明](docs/android-ui-and-background.md) · [自动构建与签名](docs/releases.md)
-- [0.4 发布说明](https://github.com/KiriKira/SoulGem/blob/main/docs/release-0.4.md) · [三端联合测试计划](https://github.com/KiriKira/SoulGem/blob/main/docs/plan-0.4-joint-test.md)
+用自己的 fork 通过 GitHub Actions 出正式包（推送 `main` 发布预览版，打 `v*` 标签发布正式版）：
 
-</details>
+| 配置 | 类型 | 用途 |
+| --- | --- | --- |
+| `GSM_RELEASE_KEYSTORE_BASE64` 等签名项、`GSM_RELEASE_CERT_SHA256` | Secrets / 变量 | 固定签名，用 `scripts/configure-release-signing.py` 一次性生成并写入 |
+| `GOOGLE_SERVICES_JSON_BASE64` | Secret（可选） | 你的 Firebase 项目的 `google-services.json`；不填则没有推送唤醒，退回长连接 |
+| `PUSH_RELAY_URL` | 变量（可选） | 你自己部署的 [Kyubey](https://github.com/KiriKira/Kyubey) 地址，须为 `https://` |
+
+本地构建时，把 `google-services.json` 放进 `app/`，并设环境变量 `MAHOGSM_PUSH_RELAY_URL` 即可。签名细节见 [docs/releases.md](docs/releases.md)。
+
+更多文档：[WebRTC 通话实现](docs/webrtc-implementation.md) · [多主机协同](docs/multi-host.md) · [多服务器节点](docs/mesh-nodes.md) · [短信备份与恢复](docs/sms-backup.md) · [后台运行与权限说明](docs/android-ui-and-background.md)
+
+## 📄 许可证
+
+[MIT](LICENSE)
