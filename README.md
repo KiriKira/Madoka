@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.webp" width="112" alt="Madoka">
+  <img src="icon.png" width="112" alt="Madoka">
 </p>
 <h1 align="center">Madoka</h1>
 <p align="center"><b>出门在外，远程收发短信接打电话都搞定</b></p>
